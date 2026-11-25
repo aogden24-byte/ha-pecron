@@ -39,6 +39,7 @@ class LocalSession(Transport):
         self._packet_id = 0
         self._lock = asyncio.Lock()
         self._login_reply = ""
+        self._values: dict[str, Any] = {}
         self._ignored: list[str] = []  # frames seen but not used, for diagnostics
 
     # -- link primitives implemented by subclasses --------------------------
@@ -184,6 +185,7 @@ class LocalSession(Transport):
     async def read(self) -> dict[str, Any]:
         async with self._lock:
             try:
+                fresh = not (self._link_open and self._iv is not None)
                 await self._ensure_session()
                 # The device may close the link right after replying, which
                 # clears the session IV; keep this session's IV for decoding.
@@ -191,11 +193,20 @@ class LocalSession(Transport):
                 assert iv is not None
                 frames = await self._collect_reply()
                 fields = self._decode_reports(frames, iv)
-                if not fields and self._link_open:
-                    # Some firmware needs a moment after login before it answers.
-                    await asyncio.sleep(1.0)
-                    frames += await self._collect_reply()
-                    fields = self._decode_reports(frames, iv)
+                if not fields:
+                    # The F5000LFP answers only the first read of a session;
+                    # later reads on the same link get nothing. Start a new
+                    # session and read once more.
+                    await self._close_link()
+                    self._iv = None
+                    if fresh:
+                        await asyncio.sleep(1.0)
+                    await self._ensure_session()
+                    iv = self._iv
+                    assert iv is not None
+                    retry = await self._collect_reply()
+                    frames += retry
+                    fields = self._decode_reports(retry, iv)
             except TransportError:
                 raise
             except (OSError, ValueError) as err:
@@ -213,7 +224,9 @@ class LocalSession(Transport):
             values = self._tsl.decode(fields)
             if not values:
                 raise TransportError("reply contained no known properties")
-            return values
+            # Replies and pushed reports can be partial; keep the full picture.
+            self._values = {**self._values, **values}
+            return dict(self._values)
 
     async def write(self, code: str, value: Any) -> None:
         try:
