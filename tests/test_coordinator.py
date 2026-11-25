@@ -159,7 +159,9 @@ async def test_missing_key_keeps_link_visible_and_uses_cloud() -> None:
 
     hass = make_hass()
     entry = make_entry({"priority_1": "tcp", "priority_2": "cloud", "priority_3": "none"})
-    api = fake_api([{"resourceCode": "battery_percentage", "resourceValce": "80", "dataType": "INT"}])
+    api = fake_api(
+        [{"resourceCode": "battery_percentage", "resourceValce": "80", "dataType": "INT"}]
+    )
 
     def request(method, path, params=None, form_data=None, json_body=None):
         if path.endswith("productTSL"):

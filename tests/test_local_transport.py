@@ -118,8 +118,14 @@ def test_encode_write_types() -> None:
 class FakeStation:
     """Minimal port-6607 station: handshake, encrypted read, write ack, then close."""
 
-    def __init__(self, key: bytes = AUTH_KEY, close_after_reply: bool = True) -> None:
+    def __init__(
+        self,
+        key: bytes = AUTH_KEY,
+        close_after_reply: bool = True,
+        reply_cmd: int = ttlv.CMD_REPORT,
+    ) -> None:
         self.key = key
+        self.reply_cmd = reply_cmd
         self.close_after_reply = close_after_reply
         self.writes: list[bytes] = []
         self.server: asyncio.AbstractServer | None = None
@@ -158,7 +164,7 @@ class FakeStation:
                         # two report packets, like the multi-packet models
                         for body in (sample_report(), ttlv.encode_num_field(51, 4)):
                             writer.write(
-                                ttlv.build_frame(ttlv.CMD_REPORT, ttlv.encrypt(self.key, iv, body))
+                                ttlv.build_frame(self.reply_cmd, ttlv.encrypt(self.key, iv, body))
                             )
                         await writer.drain()
                         if self.close_after_reply:
@@ -248,3 +254,17 @@ async def test_discovery_finds_station_by_auth_key(monkeypatch) -> None:
         await station.stop()
     assert found == "127.0.0.1"
     assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_tcp_read_accepts_data_in_ack_reply(fast_timeouts) -> None:
+    station = FakeStation(close_after_reply=False, reply_cmd=ttlv.CMD_ACK)
+    port = await station.start()
+    transport = await _transport(port)
+    try:
+        values = await transport.read()
+    finally:
+        await transport.close()
+        await station.stop()
+    assert values["battery_percentage"] == 78
+    assert values["ac_charging_power_ios"] == 4
