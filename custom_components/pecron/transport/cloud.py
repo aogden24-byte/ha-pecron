@@ -60,6 +60,12 @@ class CloudAccount:
                 raise
         raise RuntimeError("unreachable")
 
+    def token(self) -> str | None:
+        """Current access token (for the MQTT push stream)."""
+        if self.api is None:
+            self._login()
+        return getattr(self.api, "_access_token", None)
+
     async def async_login(self) -> list[Device]:
         await self.hass.async_add_executor_job(self._login)
         return self.devices
@@ -156,17 +162,35 @@ class CloudTransport(Transport):
 
     name = TRANSPORT_CLOUD
 
-    def __init__(self, account: CloudAccount, device: Device, min_interval: float) -> None:
+    def __init__(
+        self,
+        account: CloudAccount,
+        device: Device,
+        min_interval: float,
+        push_fresh: float = 0.0,
+    ) -> None:
         self.account = account
         self.device = device
         self.min_interval = min_interval
+        # Values pushed over MQTT younger than this make a REST call unnecessary.
+        self.push_fresh = push_fresh
         self._cache: dict[str, Any] | None = None
         self._cache_time = 0.0
+        self._push: dict[str, Any] = {}
+        self.push_time = 0.0
+
+    def apply_push(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Merge a pushed report; returns the full current picture."""
+        self._push = {**self._push, **values}
+        self.push_time = time.monotonic()
+        return {**(self._cache or {}), **self._push}
 
     async def read(self) -> dict[str, Any]:
         now = time.monotonic()
+        if self.push_time and now - self.push_time < self.push_fresh:
+            return {**(self._cache or {}), **self._push}
         if self._cache is not None and now - self._cache_time < self.min_interval:
-            return self._cache
+            return {**self._cache, **self._push}
         try:
             props = await self.account.async_call("get_device_properties", self.device)
         except Exception as err:
@@ -175,6 +199,7 @@ class CloudTransport(Transport):
         if not values:
             raise TransportError("cloud returned no properties (device offline?)")
         self._cache, self._cache_time = values, now
+        self._push = {}
         return values
 
     async def write(self, code: str, value: Any) -> None:

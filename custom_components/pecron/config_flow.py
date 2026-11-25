@@ -14,13 +14,17 @@ from unofficial_pecron_api.exceptions import AuthenticationError
 from .const import (
     CONF_DEVICE_CACHE,
     CONF_EMAIL,
+    CONF_FAST_REPORT_INTERVAL,
     CONF_HOST_PREFIX,
     CONF_KEY_PREFIX,
     CONF_PASSWORD,
+    CONF_PUSH_STREAM,
     CONF_REFRESH_INTERVAL,
     CONF_REGION,
     CONF_SCAN_INTERVAL_LOCAL,
+    DEFAULT_FAST_REPORT_INTERVAL,
     DEFAULT_PRIORITIES,
+    DEFAULT_PUSH_STREAM,
     DEFAULT_REFRESH_INTERVAL,
     DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL_LOCAL,
@@ -160,6 +164,17 @@ class PecronOptionsFlow(config_entries.OptionsFlow):
         fields[vol.Required(CONF_REFRESH_INTERVAL, default=current_cloud)] = vol.All(
             vol.Coerce(int), vol.Range(min=60, max=3600)
         )
+        fields[
+            vol.Required(
+                CONF_PUSH_STREAM, default=options.get(CONF_PUSH_STREAM, DEFAULT_PUSH_STREAM)
+            )
+        ] = bool
+        fields[
+            vol.Required(
+                CONF_FAST_REPORT_INTERVAL,
+                default=options.get(CONF_FAST_REPORT_INTERVAL, DEFAULT_FAST_REPORT_INTERVAL),
+            )
+        ] = vol.All(vol.Coerce(int), vol.Any(0, vol.Range(min=20, max=3600)))
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
 
     def _cached_devices(self) -> dict[str, dict]:

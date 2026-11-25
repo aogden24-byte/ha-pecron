@@ -112,7 +112,12 @@
           "priority_2": "2nd choice",
           "priority_3": "3rd choice",
           "scan_interval_local": "Local poll interval (seconds)",
-          "refresh_interval": "Cloud poll interval (seconds, minimum 60 – the cloud has an account quota)"
+          "refresh_interval": "Cloud poll interval (seconds, minimum 60 – the cloud has an account quota)",
+          "push_stream": "Cloud push stream (live updates, no API quota)",
+          "fast_report_interval": "High-frequency request interval (s, 0 = off)"
+        },
+        "data_description": {
+          "fast_report_interval": "Asks the station to report every few seconds. Each request uses 1 cloud API call (quota about 1,280 a day): 120 s = 720 a day. 0 = off."
         }
       },
       "devices": {

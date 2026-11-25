@@ -61,3 +61,14 @@ LINK_FAIL_LIMIT: Final = 3
 LINK_PROBE_BACKOFF_START: Final = 60
 LINK_PROBE_BACKOFF_MAX: Final = 900
 STALE_POLL_LIMIT: Final = 3
+
+# Cloud MQTT push stream (pecron-monitor's fast path)
+CONF_PUSH_STREAM: Final = "push_stream"
+DEFAULT_PUSH_STREAM: Final = True
+# How often to ask the station (via cloud REST, 1 API request each) for
+# high-frequency reporting. 0 disables. The Pecron app re-sends every 15-20 s;
+# the account quota is about 1,280 requests a day.
+CONF_FAST_REPORT_INTERVAL: Final = "fast_report_interval"
+DEFAULT_FAST_REPORT_INTERVAL: Final = 120
+FAST_REPORT_CODE: Final = "high_frequency_reporting"
+FAST_REPORT_MODE: Final = 3  # LAN + Wi-Fi/cloud

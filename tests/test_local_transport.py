@@ -278,7 +278,12 @@ async def test_tcp_read_accepts_data_in_ack_reply(fast_timeouts) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tcp_read_starts_new_session_when_station_answers_once(fast_timeouts) -> None:
+async def test_tcp_read_starts_new_session_when_station_answers_once(
+    fast_timeouts, monkeypatch
+) -> None:
+    from custom_components.pecron.transport import local
+
+    monkeypatch.setattr(local, "PUSH_GRACE", 0.0)  # no recent data to fall back on
     station = FakeStation(close_after_reply=False)
     station.answer_once = True
     port = await station.start()
@@ -292,3 +297,20 @@ async def test_tcp_read_starts_new_session_when_station_answers_once(fast_timeou
     assert first["battery_percentage"] == 78
     assert second["battery_percentage"] == 78
     assert station.sessions == 2
+
+
+@pytest.mark.asyncio
+async def test_tcp_silent_read_uses_recent_values_and_requests_fast_reports(fast_timeouts) -> None:
+    station = FakeStation(close_after_reply=False)
+    station.answer_once = True
+    port = await station.start()
+    transport = await _transport(port)
+    try:
+        first = await transport.read()
+        second = await transport.read()
+    finally:
+        await transport.close()
+        await station.stop()
+    assert second == first
+    assert station.sessions == 1
+    assert ttlv.encode_num_field(100, 3) in station.writes

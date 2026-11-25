@@ -22,6 +22,14 @@ FIRST_REPORT_TIMEOUT = 15.0
 REPORT_GAP_TIMEOUT = 3.0
 WRITE_ACK_TIMEOUT = 5.0
 POST_LOGIN_DELAY = 0.5  # some firmware drops reads sent immediately after login
+# Ask the station to stream reports to the local client (TSL property 100,
+# high_frequency_reporting: 0 infrequent, 1 LAN, 2 Wi-Fi, 3 both). The
+# station reverts it on its own, so it is re-sent periodically.
+FAST_REPORT_PID = 100
+FAST_REPORT_VALUE = 3  # LAN + Wi-Fi, as the Pecron app sends
+FAST_REPORT_EVERY = 15.0  # the app re-sends every 15-20 s
+# How long values pushed by the station stay valid when a read gets no reply.
+PUSH_GRACE = 600.0
 LINK_CLOSED = -1  # sentinel frame command queued when the link drops
 DATA_CMDS = {ttlv.CMD_ACK, ttlv.CMD_REPORT}
 
@@ -40,6 +48,8 @@ class LocalSession(Transport):
         self._lock = asyncio.Lock()
         self._login_reply = ""
         self._values: dict[str, Any] = {}
+        self._last_data = 0.0
+        self._fast_sent = 0.0
         self._ignored: list[str] = []  # frames seen but not used, for diagnostics
 
     # -- link primitives implemented by subclasses --------------------------
@@ -135,6 +145,7 @@ class LocalSession(Transport):
                     "(another tool may have regenerated it)"
                 )
             self._iv = ttlv.make_iv(random_str)
+            self._fast_sent = 0.0
             await asyncio.sleep(POST_LOGIN_DELAY)
         except Exception:
             await self._close_link()
@@ -166,6 +177,15 @@ class LocalSession(Transport):
                 _LOGGER.debug("%s: unparsable 0x%04x: %s", self.name, frame.cmd, err)
         return fields
 
+    async def _request_fast_reports(self, iv: bytes) -> None:
+        loop = asyncio.get_running_loop()
+        if loop.time() - self._fast_sent < FAST_REPORT_EVERY and self._fast_sent:
+            return
+        self._fast_sent = loop.time()
+        plain = ttlv.encode_num_field(FAST_REPORT_PID, FAST_REPORT_VALUE)
+        payload = ttlv.encrypt(self._auth_key, iv, plain)
+        await self._send(ttlv.build_frame(ttlv.CMD_WRITE, payload, self._next_id()))
+
     async def _collect_reply(self) -> list[ttlv.Frame]:
         """Send one read and gather every frame of the reply."""
         # Keep reports the station pushed on its own since the last poll.
@@ -191,8 +211,18 @@ class LocalSession(Transport):
                 # clears the session IV; keep this session's IV for decoding.
                 iv = self._iv
                 assert iv is not None
+                await self._request_fast_reports(iv)
                 frames = await self._collect_reply()
                 fields = self._decode_reports(frames, iv)
+                loop = asyncio.get_running_loop()
+                if not fields and self._values and loop.time() - self._last_data < PUSH_GRACE:
+                    # Station ignores this read but recently pushed data.
+                    _LOGGER.debug(
+                        "%s: no reply; using values pushed %.0f s ago",
+                        self.name,
+                        loop.time() - self._last_data,
+                    )
+                    return dict(self._values)
                 if not fields:
                     # The F5000LFP answers only the first read of a session;
                     # later reads on the same link get nothing. Start a new
@@ -204,6 +234,7 @@ class LocalSession(Transport):
                     await self._ensure_session()
                     iv = self._iv
                     assert iv is not None
+                    await self._request_fast_reports(iv)
                     retry = await self._collect_reply()
                     frames += retry
                     fields = self._decode_reports(retry, iv)
@@ -226,6 +257,7 @@ class LocalSession(Transport):
                 raise TransportError("reply contained no known properties")
             # Replies and pushed reports can be partial; keep the full picture.
             self._values = {**self._values, **values}
+            self._last_data = asyncio.get_running_loop().time()
             return dict(self._values)
 
     async def write(self, code: str, value: Any) -> None:

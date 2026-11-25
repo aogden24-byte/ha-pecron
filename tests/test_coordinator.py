@@ -62,7 +62,14 @@ def build(hass, entry) -> PecronDataUpdateCoordinator:
 @pytest.mark.asyncio
 async def test_cloud_only_bootstrap_caches_tsl_but_not_key() -> None:
     hass = make_hass()
-    entry = make_entry({"priority_1": "cloud", "priority_2": "none", "priority_3": "none"})
+    entry = make_entry(
+        {
+            "priority_1": "cloud",
+            "priority_2": "none",
+            "priority_3": "none",
+            "push_stream": False,
+        }
+    )
     api = fake_api(
         [{"resourceCode": "battery_percentage", "resourceValce": "74", "dataType": "INT"}]
     )
@@ -178,3 +185,33 @@ async def test_missing_key_keeps_link_visible_and_uses_cloud() -> None:
     assert "no local key" in link.health["tcp"].last_error
     paths = [c.args[1] for c in api._request.call_args_list]
     assert any(p.endswith("regenerateAuthKey") for p in paths)  # one-time fallback tried
+
+
+@pytest.mark.asyncio
+async def test_push_stream_updates_entities_without_rest_calls() -> None:
+    hass = make_hass()
+    entry = make_entry(
+        {
+            "priority_1": "cloud",
+            "priority_2": "none",
+            "priority_3": "none",
+            "fast_report_interval": 0,
+        }
+    )
+    api = fake_api(
+        [{"resourceCode": "battery_percentage", "resourceValce": "74", "dataType": "INT"}]
+    )
+    with patch("custom_components.pecron.transport.cloud.PecronAPI", return_value=api):
+        coordinator = build(hass, entry)
+        coordinator.async_update_listeners = MagicMock()
+        await coordinator._async_update_data()
+        assert coordinator.update_interval.total_seconds() == 15  # poll fast: push is free
+        assert coordinator.stream is not None
+        coordinator.data = {}
+        coordinator._on_push("F8D8117CB639", {"battery_percentage": "61"})
+        calls = api.get_device_properties.call_count
+        data = await coordinator._async_update_data()
+    assert coordinator.data["F8D8117CB639"]["properties"].battery_percentage == 61
+    coordinator.async_update_listeners.assert_called_once()
+    assert data["F8D8117CB639"]["properties"].battery_percentage == 61
+    assert api.get_device_properties.call_count == calls  # fresh push: no REST read
