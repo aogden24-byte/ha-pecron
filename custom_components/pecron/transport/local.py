@@ -38,6 +38,7 @@ class LocalSession(Transport):
         self._iv: bytes | None = None
         self._packet_id = 0
         self._lock = asyncio.Lock()
+        self._login_reply = ""
         self._ignored: list[str] = []  # frames seen but not used, for diagnostics
 
     # -- link primitives implemented by subclasses --------------------------
@@ -126,6 +127,7 @@ class LocalSession(Transport):
                 )
             )
             frame = await self._wait_frame({ttlv.CMD_LOGIN_RESP}, HANDSHAKE_TIMEOUT)
+            self._login_reply = frame.payload.hex() or "empty"
             if not ttlv.login_ok(frame.payload):
                 raise TransportError(
                     "login rejected: the cached auth key is no longer valid "
@@ -205,7 +207,9 @@ class LocalSession(Transport):
                 seen = [f"0x{f.cmd:04x}/{len(f.payload)}B" for f in frames] + self._ignored
                 self._ignored = []
                 seen = ", ".join(seen) or "nothing"
-                raise TransportError(f"no data fields in the reply (received: {seen})")
+                raise TransportError(
+                    f"no data fields in the reply (received: {seen}; login reply: {self._login_reply})"
+                )
             values = self._tsl.decode(fields)
             if not values:
                 raise TransportError("reply contained no known properties")
