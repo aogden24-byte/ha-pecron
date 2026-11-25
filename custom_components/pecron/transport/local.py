@@ -22,6 +22,7 @@ REPORT_GAP_TIMEOUT = 3.0
 WRITE_ACK_TIMEOUT = 5.0
 POST_LOGIN_DELAY = 0.5  # some firmware drops reads sent immediately after login
 LINK_CLOSED = -1  # sentinel frame command queued when the link drops
+DATA_CMDS = {ttlv.CMD_ACK, ttlv.CMD_REPORT}
 
 
 class LocalSession(Transport):
@@ -135,17 +136,42 @@ class LocalSession(Transport):
             raise
 
     def _decode_reports(self, frames: list[ttlv.Frame], iv: bytes) -> list[ttlv.Field]:
+        """Decode data from status replies.
+
+        Most models answer a read with 0x0014 reports; some (BLE on several
+        models, F5000LFP) put the data in the 0x0012 reply itself. Payloads are
+        normally AES-CBC; fall back to plain TTLV when decryption fails.
+        """
         fields: list[ttlv.Field] = []
         for frame in frames:
-            if frame.cmd != ttlv.CMD_REPORT or not frame.payload:
+            if frame.cmd not in DATA_CMDS or not frame.payload:
                 continue
+            plain: bytes | None = None
+            if len(frame.payload) >= 16 and len(frame.payload) % 16 == 0:
+                try:
+                    plain = ttlv.decrypt(self._auth_key, iv, frame.payload)
+                except ValueError as err:
+                    _LOGGER.debug("%s: undecryptable 0x%04x: %s", self.name, frame.cmd, err)
+            # Only treat the payload as plain TTLV when it is not ciphertext.
+            candidate = plain if plain is not None else frame.payload
             try:
-                plain = ttlv.decrypt(self._auth_key, iv, frame.payload)
-            except ValueError as err:
-                _LOGGER.debug("%s: undecryptable report: %s", self.name, err)
-                continue
-            fields.extend(ttlv.parse_fields(plain))
+                fields.extend(ttlv.parse_fields(candidate))
+            except (ttlv.TtlvError, ValueError, IndexError) as err:
+                _LOGGER.debug("%s: unparsable 0x%04x: %s", self.name, frame.cmd, err)
         return fields
+
+    async def _collect_reply(self) -> list[ttlv.Frame]:
+        """Send one read and gather every frame of the reply."""
+        frames = [f for f in self._drain() if f.cmd in DATA_CMDS]
+        await self._send(ttlv.build_frame(ttlv.CMD_READ, b"", self._next_id()))
+        timeout = FIRST_REPORT_TIMEOUT
+        while True:
+            try:
+                frames.append(await self._wait_frame(DATA_CMDS, timeout))
+            except TransportError:
+                break
+            timeout = REPORT_GAP_TIMEOUT
+        return frames
 
     # -- Transport API ------------------------------------------------------
 
@@ -157,17 +183,13 @@ class LocalSession(Transport):
                 # clears the session IV; keep this session's IV for decoding.
                 iv = self._iv
                 assert iv is not None
-                # Reports the device pushed since the last poll are still valid data.
-                frames = [f for f in self._drain() if f.cmd == ttlv.CMD_REPORT]
-                await self._send(ttlv.build_frame(ttlv.CMD_READ, b"", self._next_id()))
-                timeout = FIRST_REPORT_TIMEOUT
-                while True:
-                    try:
-                        frames.append(await self._wait_frame({ttlv.CMD_REPORT}, timeout))
-                    except TransportError:
-                        break
-                    timeout = REPORT_GAP_TIMEOUT
+                frames = await self._collect_reply()
                 fields = self._decode_reports(frames, iv)
+                if not fields and self._link_open:
+                    # Some firmware needs a moment after login before it answers.
+                    await asyncio.sleep(1.0)
+                    frames += await self._collect_reply()
+                    fields = self._decode_reports(frames, iv)
             except TransportError:
                 raise
             except (OSError, ValueError) as err:
@@ -175,7 +197,8 @@ class LocalSession(Transport):
                 raise TransportError(str(err)) from err
             if not fields:
                 await self._close_link()
-                raise TransportError("no data fields in the reply")
+                seen = ", ".join(f"0x{f.cmd:04x}/{len(f.payload)}B" for f in frames) or "nothing"
+                raise TransportError(f"no data fields in the reply (received: {seen})")
             values = self._tsl.decode(fields)
             if not values:
                 raise TransportError("reply contained no known properties")

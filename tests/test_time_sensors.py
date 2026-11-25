@@ -90,7 +90,9 @@ class TestDeviceStates:
         assert sensor_full.native_value is None
 
         # Time to Empty
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value is None
 
     def test_charging_only_state(
@@ -116,7 +118,9 @@ class TestDeviceStates:
         assert sensor_full.native_value == 120
 
         # Time to Empty - should be N/A
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value is None
 
     def test_discharging_only_state(
@@ -142,7 +146,9 @@ class TestDeviceStates:
         assert sensor_full.native_value is None
 
         # Time to Empty - should show value
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value == 240
 
     def test_ups_mode_state(
@@ -168,16 +174,16 @@ class TestDeviceStates:
         assert sensor_full.native_value == 120
 
         # Time to Empty - should show value (runtime if input lost)
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value == 240
 
 
 class TestPropertyMissing:
     """Test behavior when properties are missing."""
 
-    def test_charging_time_missing_shows_na(
-        self, mock_coordinator, mock_device, time_to_full_desc
-    ):
+    def test_charging_time_missing_shows_na(self, mock_coordinator, mock_device, time_to_full_desc):
         """Property missing should show N/A regardless of state."""
         props = create_props(
             charging_time=None,  # Missing
@@ -238,7 +244,9 @@ class TestPropertyMissing:
         sensor_full = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_full_desc)
         assert sensor_full.native_value is None
 
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value is None
 
 
@@ -313,7 +321,9 @@ class TestPowerValueEdgeCases:
         sensor_full = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_full_desc)
         assert sensor_full.native_value is None
 
-        sensor_empty = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_empty_desc)
+        sensor_empty = PecronSensor(
+            mock_coordinator, "test_device", mock_device, time_to_empty_desc
+        )
         assert sensor_empty.native_value is None
 
     def test_power_values_missing_treated_as_zero(
@@ -384,18 +394,14 @@ class TestPowerValueEdgeCases:
 class TestCoordinatorDataEdgeCases:
     """Test edge cases with coordinator data."""
 
-    def test_coordinator_data_none(
-        self, mock_coordinator, mock_device, time_to_full_desc
-    ):
+    def test_coordinator_data_none(self, mock_coordinator, mock_device, time_to_full_desc):
         """No coordinator data should return None."""
         mock_coordinator.data = None
 
         sensor = PecronSensor(mock_coordinator, "test_device", mock_device, time_to_full_desc)
         assert sensor.native_value is None
 
-    def test_device_not_in_coordinator_data(
-        self, mock_coordinator, mock_device, time_to_full_desc
-    ):
+    def test_device_not_in_coordinator_data(self, mock_coordinator, mock_device, time_to_full_desc):
         """Device not in coordinator data should return None."""
         mock_coordinator.data = {}  # Empty dict
 
