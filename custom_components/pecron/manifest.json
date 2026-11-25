@@ -22,5 +22,5 @@
     "unofficial-pecron-api==0.4.1",
     "paho-mqtt>=2.0.0"
   ],
-  "version": "0.8.2"
+  "version": "0.8.3"
 }
