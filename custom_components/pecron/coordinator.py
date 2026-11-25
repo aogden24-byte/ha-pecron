@@ -27,6 +27,7 @@ from .const import (
     CONF_DEVICE_CACHE,
     CONF_EMAIL,
     CONF_HOST_PREFIX,
+    CONF_KEY_PREFIX,
     CONF_PASSWORD,
     CONF_REFRESH_INTERVAL,
     CONF_REGION,
@@ -304,7 +305,8 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
                         changed = True
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.warning("Could not fetch TSL for %s: %s", device.device_name, err)
-                if wants_local and not entry.get("auth_key"):
+                manual_key = self.entry.options.get(f"{CONF_KEY_PREFIX}{device.device_key}")
+                if wants_local and not entry.get("auth_key") and not manual_key:
                     try:
                         # No cached key at all: regeneration is allowed as a
                         # one-time fallback (some models reject getAuthKey).
@@ -329,7 +331,9 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _build_link(self, device: Device, cached: dict) -> DeviceLink:
         transports: list[Transport] = []
-        auth_key = cached.get("auth_key")
+        auth_key = self.entry.options.get(f"{CONF_KEY_PREFIX}{device.device_key}") or cached.get(
+            "auth_key"
+        )
         tsl_map = TslMap(cached.get("tsl", []))
         for name in self.priorities:
             if name == TRANSPORT_CLOUD:

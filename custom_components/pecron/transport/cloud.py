@@ -104,11 +104,11 @@ class CloudAccount:
                     f"/v2/binding/enduserapi/{endpoint}",
                     form_data={"pk": product_key, "dk": device_key},
                 )
-            except PecronAPIError as err:
+            except Exception as err:  # noqa: BLE001 - HTTP errors are not PecronAPIError
                 if is_auth_error(err):
                     raise
                 last_error = err
-                _LOGGER.debug("%s failed for %s: %s", endpoint, device_key, err)
+                _LOGGER.warning("%s failed for %s: %s", endpoint, device_key, err)
                 continue
             key = result.get("authKey") if isinstance(result, dict) else None
             if key:
@@ -120,6 +120,7 @@ class CloudAccount:
                         device_key,
                     )
                 return str(key)
+            _LOGGER.warning("%s returned no key for %s: %r", endpoint, device_key, result)
             last_error = PecronAPIError(f"{endpoint} returned no key")
         raise last_error or PecronAPIError("no auth key endpoint succeeded")
 
