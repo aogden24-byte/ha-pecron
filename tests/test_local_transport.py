@@ -126,6 +126,8 @@ class FakeStation:
     ) -> None:
         self.key = key
         self.reply_cmd = reply_cmd
+        self.answer_once = False  # F5000LFP: only the first read per session is answered
+        self.sessions = 0
         self.close_after_reply = close_after_reply
         self.writes: list[bytes] = []
         self.server: asyncio.AbstractServer | None = None
@@ -142,6 +144,8 @@ class FakeStation:
     async def _handle(self, reader, writer) -> None:
         r = ttlv.FrameReassembler()
         iv = ttlv.make_iv(RANDOM)
+        self.sessions += 1
+        answered = False
         try:
             while data := await reader.read(1024):
                 for raw in r.feed(data):
@@ -160,7 +164,10 @@ class FakeStation:
                                 ttlv.CMD_LOGIN_RESP, ttlv.encode_num_field(3, 0 if ok else -1)
                             )
                         )
+                    elif frame.cmd == ttlv.CMD_READ and self.answer_once and answered:
+                        pass
                     elif frame.cmd == ttlv.CMD_READ:
+                        answered = True
                         # two report packets, like the multi-packet models
                         for body in (sample_report(), ttlv.encode_num_field(51, 4)):
                             writer.write(
@@ -268,3 +275,20 @@ async def test_tcp_read_accepts_data_in_ack_reply(fast_timeouts) -> None:
         await station.stop()
     assert values["battery_percentage"] == 78
     assert values["ac_charging_power_ios"] == 4
+
+
+@pytest.mark.asyncio
+async def test_tcp_read_starts_new_session_when_station_answers_once(fast_timeouts) -> None:
+    station = FakeStation(close_after_reply=False)
+    station.answer_once = True
+    port = await station.start()
+    transport = await _transport(port)
+    try:
+        first = await transport.read()
+        second = await transport.read()
+    finally:
+        await transport.close()
+        await station.stop()
+    assert first["battery_percentage"] == 78
+    assert second["battery_percentage"] == 78
+    assert station.sessions == 2
