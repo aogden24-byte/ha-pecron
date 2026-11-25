@@ -28,7 +28,7 @@ Clone the repository to a temporary location:
 
 ```bash
 cd /tmp
-git clone https://github.com/jsight/ha-pecron.git
+git clone https://github.com/aogden24-byte/ha-pecron.git
 ```
 
 #### Step 2: Locate Your Home Assistant Configuration
@@ -189,7 +189,7 @@ Replace `~/.homeassistant` with your actual Home Assistant config path.
 ## Support
 
 For issues, bugs, or feature requests:
-- Check the [GitHub Issues](https://github.com/jsight/ha-pecron/issues)
+- Check the [GitHub Issues](https://github.com/aogden24-byte/ha-pecron/issues)
 - Open a new issue with:
   - Home Assistant version
   - Integration version

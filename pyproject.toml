@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "Home Assistant integration for Pecron portable power stations"
 readme = "README.md"
 license = {text = "MIT"}
-authors = [{name = "Jesse Sightler", email = "jsightler@example.com"}]
+authors = [{name = "Andrew Ogden"}, {name = "Jesse Sightler"}]
 requires-python = ">=3.11"
 dependencies = ["unofficial-pecron-api==0.4.1"]
 
 [project.urls]
-Homepage = "https://github.com/jsight/ha-pecron"
-Repository = "https://github.com/jsight/ha-pecron"
-Issues = "https://github.com/jsight/ha-pecron/issues"
+Homepage = "https://github.com/aogden24-byte/ha-pecron"
+Repository = "https://github.com/aogden24-byte/ha-pecron"
+Issues = "https://github.com/aogden24-byte/ha-pecron/issues"
 
 [tool.ruff]
 line-length = 100

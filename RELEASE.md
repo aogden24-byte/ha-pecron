@@ -90,7 +90,7 @@ If validation fails, the release workflow will fail with clear error messages.
 - [ ] Git tag created with correct format
 - [ ] Tag pushed to GitHub
 - [ ] Check GitHub Actions workflow completes
-- [ ] Verify release appears at https://github.com/jsight/ha-pecron/releases
+- [ ] Verify release appears at https://github.com/aogden24-byte/ha-pecron/releases
 
 ## Rollback
 
