@@ -56,7 +56,7 @@ from .tsl_map import TslMap, to_tsl_info
 
 _LOGGER = logging.getLogger(__name__)
 
-READ_TIMEOUT = {TRANSPORT_BLE: 30.0, TRANSPORT_TCP: 25.0, TRANSPORT_CLOUD: 30.0}
+READ_TIMEOUT = {TRANSPORT_BLE: 50.0, TRANSPORT_TCP: 50.0, TRANSPORT_CLOUD: 30.0}
 
 
 def configured_priorities(entry: ConfigEntry) -> list[str]:

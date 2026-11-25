@@ -15,7 +15,8 @@ from . import Transport, TransportError
 _LOGGER = logging.getLogger(__name__)
 
 HANDSHAKE_TIMEOUT = 8.0
-FIRST_REPORT_TIMEOUT = 6.0
+# Some models take well over 6 s before the first status frame arrives.
+FIRST_REPORT_TIMEOUT = 15.0
 # Some models (E3600/E3800) leave up to ~3 s between the packets of one
 # multi-packet status reply.
 REPORT_GAP_TIMEOUT = 3.0
@@ -37,6 +38,7 @@ class LocalSession(Transport):
         self._iv: bytes | None = None
         self._packet_id = 0
         self._lock = asyncio.Lock()
+        self._ignored: list[str] = []  # frames seen but not used, for diagnostics
 
     # -- link primitives implemented by subclasses --------------------------
 
@@ -94,6 +96,7 @@ class LocalSession(Transport):
             if frame.cmd in cmds:
                 return frame
             _LOGGER.debug("%s: ignoring frame cmd 0x%04x", self.name, frame.cmd)
+            self._ignored = [*self._ignored[-7:], f"0x{frame.cmd:04x}/{len(frame.payload)}B"]
 
     def _drain(self) -> list[ttlv.Frame]:
         frames = []
@@ -162,6 +165,7 @@ class LocalSession(Transport):
 
     async def _collect_reply(self) -> list[ttlv.Frame]:
         """Send one read and gather every frame of the reply."""
+        # Keep reports the station pushed on its own since the last poll.
         frames = [f for f in self._drain() if f.cmd in DATA_CMDS]
         await self._send(ttlv.build_frame(ttlv.CMD_READ, b"", self._next_id()))
         timeout = FIRST_REPORT_TIMEOUT
@@ -196,8 +200,11 @@ class LocalSession(Transport):
                 await self._close_link()
                 raise TransportError(str(err)) from err
             if not fields:
-                await self._close_link()
-                seen = ", ".join(f"0x{f.cmd:04x}/{len(f.payload)}B" for f in frames) or "nothing"
+                # Leave the link open: some stations push 0x0014 reports on
+                # their own while a client stays connected.
+                seen = [f"0x{f.cmd:04x}/{len(f.payload)}B" for f in frames] + self._ignored
+                self._ignored = []
+                seen = ", ".join(seen) or "nothing"
                 raise TransportError(f"no data fields in the reply (received: {seen})")
             values = self._tsl.decode(fields)
             if not values:
