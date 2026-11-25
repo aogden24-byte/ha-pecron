@@ -29,6 +29,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .const import DOMAIN
 from .link_entities import link_entities_for
+from .raw_entities import raw_sensor_tracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -272,6 +273,11 @@ async def async_setup_entry(
 
     # Register the listener
     entry.async_on_unload(coordinator.async_add_listener(check_for_new_devices))
+
+    # One diagnostic sensor per raw field, added as fields first appear.
+    track_raw = raw_sensor_tracker(coordinator, async_add_entities)
+    track_raw()
+    entry.async_on_unload(coordinator.async_add_listener(track_raw))
 
 
 class PecronSensor(CoordinatorEntity, SensorEntity):
