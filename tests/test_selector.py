@@ -123,3 +123,23 @@ def test_priority_options_allow_disabling() -> None:
     assert configured_priorities(entry) == ["tcp"]
     entry = MagicMock(options={})
     assert configured_priorities(entry) == ["ble", "tcp", "cloud"]
+
+
+@pytest.mark.asyncio
+async def test_wifi_settings_refresh_runs_beside_ble(clock) -> None:
+    class Settings(FakeTransport):
+        async def read(self):
+            self.reads += 1
+            return {"noastime_io": 4, "source": "tcp"}
+
+    ble, tcp = FakeTransport("ble"), Settings("tcp")
+    link = make_link(ble, tcp)
+    await link.poll()
+    await link._settings_task
+    assert tcp.reads == 1
+    # Settings added; the live value BLE just delivered is kept.
+    assert link.values["noastime_io"] == 4
+    assert link.values["source"] == "ble"
+    clock.t += 10
+    await link.poll()
+    assert tcp.reads == 1  # not again until SETTINGS_REFRESH has passed

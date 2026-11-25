@@ -63,6 +63,8 @@ from .tsl_map import TslMap, to_tsl_info
 
 _LOGGER = logging.getLogger(__name__)
 
+# How often Wi-Fi is read for settings while Bluetooth carries live data.
+SETTINGS_REFRESH = 300.0
 READ_TIMEOUT = {TRANSPORT_BLE: 50.0, TRANSPORT_TCP: 50.0, TRANSPORT_CLOUD: 30.0}
 
 
@@ -157,6 +159,9 @@ class DeviceLink:
         self.stale_polls = 0
         # Last values each transport delivered (for diagnostics / coverage).
         self.by_transport: dict[str, dict[str, Any]] = {}
+        # Wi-Fi returns the settings Bluetooth omits; read it in the background.
+        self._settings_task: asyncio.Task | None = None
+        self._settings_time = 0.0
 
     @property
     def device_key(self) -> str:
@@ -190,10 +195,42 @@ class DeviceLink:
             self.stale_polls = 0
             if transport.name != TRANSPORT_CLOUD:
                 await self._fill_from_cloud(values)
+            if transport.name == TRANSPORT_BLE:
+                self._maybe_refresh_settings(set(values))
             return self.values
         self.active = None
         self.stale_polls += 1
         return None
+
+    def _maybe_refresh_settings(self, live_codes: set[str]) -> None:
+        """Every SETTINGS_REFRESH s, read Wi-Fi in the background for settings."""
+        tcp = next((t for t in self.transports if t.name == TRANSPORT_TCP), None)
+        now = time.monotonic()
+        if (
+            tcp is None
+            or now - self._settings_time < SETTINGS_REFRESH
+            or (self._settings_task is not None and not self._settings_task.done())
+            or not self.health[TRANSPORT_TCP].eligible(now)
+        ):
+            return
+        self._settings_time = now
+        self._settings_task = asyncio.create_task(self._refresh_settings(tcp, live_codes))
+
+    async def _refresh_settings(self, tcp: Transport, live_codes: set[str]) -> None:
+        health = self.health[TRANSPORT_TCP]
+        try:
+            values = await asyncio.wait_for(tcp.read(), READ_TIMEOUT[TRANSPORT_TCP])
+        except (TransportError, TimeoutError, OSError) as err:
+            health.failure(time.monotonic(), str(err) or type(err).__name__)
+            return
+        except asyncio.CancelledError:
+            raise
+        health.success(time.monotonic())
+        self.by_transport[TRANSPORT_TCP] = {**self.by_transport.get(TRANSPORT_TCP, {}), **values}
+        # Never overwrite what Bluetooth delivered in its latest report.
+        updates = {k: v for k, v in values.items() if k not in live_codes}
+        if updates and self.values is not None:
+            self.values = {**self.values, **updates}
 
     async def _fill_from_cloud(self, local: dict[str, Any]) -> None:
         """Fill properties the local link never reports from the cloud.
@@ -248,6 +285,8 @@ class DeviceLink:
         }
 
     async def close(self) -> None:
+        if self._settings_task is not None:
+            self._settings_task.cancel()
         for transport in self.transports:
             try:
                 await transport.close()
