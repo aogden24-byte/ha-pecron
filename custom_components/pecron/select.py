@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .const import DOMAIN
 from .transport import TransportError
+from .tsl_entities import setup_tracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -196,6 +197,9 @@ async def async_setup_entry(
 
     # Register the listener
     entry.async_on_unload(coordinator.async_add_listener(check_for_new_devices))
+
+    # Named measurements / settings from the TSL, added as their data appears.
+    setup_tracker(coordinator, entry, "select", async_add_entities)
 
 
 class PecronSelect(CoordinatorEntity, SelectEntity):

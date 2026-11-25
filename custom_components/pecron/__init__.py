@@ -18,7 +18,7 @@ from .coordinator import PecronDataUpdateCoordinator
 from .transport import TransportError
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS: Final = ["sensor", "binary_sensor", "switch", "select"]
+PLATFORMS: Final = ["sensor", "binary_sensor", "switch", "select", "number"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
