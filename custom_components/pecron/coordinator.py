@@ -188,10 +188,36 @@ class DeviceLink:
             # cloud has); keep the last known value of every property.
             self.values = {**(self.values or {}), **values}
             self.stale_polls = 0
+            if transport.name != TRANSPORT_CLOUD:
+                await self._fill_from_cloud(values)
             return self.values
         self.active = None
         self.stale_polls += 1
         return None
+
+    async def _fill_from_cloud(self, local: dict[str, Any]) -> None:
+        """Fill properties the local link never reports from the cloud.
+
+        The cloud transport rate-limits itself (one REST read per cloud
+        interval, or none while the push stream is fresh), so this is cheap.
+        """
+        cloud = next((t for t in self.transports if t.name == TRANSPORT_CLOUD), None)
+        if cloud is None or not self.health[TRANSPORT_CLOUD].eligible(time.monotonic()):
+            return
+        try:
+            remote = await asyncio.wait_for(cloud.read(), READ_TIMEOUT[TRANSPORT_CLOUD])
+        except (TransportError, TimeoutError, OSError) as err:
+            self.health[TRANSPORT_CLOUD].failure(time.monotonic(), str(err) or type(err).__name__)
+            return
+        self.health[TRANSPORT_CLOUD].success(time.monotonic())
+        self.by_transport[TRANSPORT_CLOUD] = {
+            **self.by_transport.get(TRANSPORT_CLOUD, {}),
+            **remote,
+        }
+        local_codes = set(self.by_transport.get(self.active or "", {})) | set(local)
+        gaps = {k: v for k, v in remote.items() if k not in local_codes}
+        if gaps:
+            self.values = {**(self.values or {}), **gaps}
 
     async def write(self, code: str, value: Any) -> str:
         """Write via the active transport first, then any other healthy one."""
@@ -497,8 +523,17 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
         pushed = coerce_kv(kv, types)
         link.by_transport["cloud_push"] = {**link.by_transport.get("cloud_push", {}), **pushed}
         values = cloud.apply_push(pushed)
-        # Only take over the entities if no higher-priority link is delivering.
         if link.active not in (None, TRANSPORT_CLOUD):
+            # A local link is delivering: only fill properties it never reports.
+            local_codes = set(link.by_transport.get(link.active, {}))
+            gaps = {k: v for k, v in pushed.items() if k not in local_codes}
+            if not gaps or link.values is None:
+                return
+            link.values = {**link.values, **gaps}
+            snap = link.snapshot()
+            if snap is not None:
+                self.data = {**(self.data or {}), device_key: snap}
+                self.async_update_listeners()
             return
         link.values = {**(link.values or {}), **values}
         link.active = TRANSPORT_CLOUD

@@ -49,7 +49,10 @@ async def test_uses_highest_priority(clock) -> None:
     values = await link.poll()
     assert values["source"] == "ble"
     assert link.active == "ble"
-    assert tcp.reads == cloud.reads == 0
+    assert tcp.reads == 0
+    # The cloud is read only to fill properties BLE never reports; it does not
+    # override values the active link delivers.
+    assert cloud.reads == 1
 
 
 @pytest.mark.asyncio
