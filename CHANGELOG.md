@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-25
+
+### Added
+- **Local connections**: Bluetooth (local adapter or ESPHome proxy) and Wi-Fi TCP (port 6607) alongside the cloud, with automatic LAN discovery of the station.
+- **Priority selector**: choose the order of Bluetooth, Wi-Fi and cloud, or disable any of them. Per-connection health tracking with demotion after 3 failures, exponential re-probe back-off and automatic promotion.
+- **Diagnostic entities**: a Connection sensor (active link) and one connectivity sensor per link with failure counts and the last error.
+- Separate local and cloud poll intervals; optional fixed IP per station.
+- Offline start: device data model and local key are cached, so local connections work when the cloud is unreachable.
+- HACS and hassfest validation workflow; brand icons.
+
+### Changed
+- Writes (switches, selects, `pecron.set_property`) go through the active connection and fall back to the next healthy one.
+- Device data stays available for 3 failed polls before entities go unavailable.
+- The TSL is fetched once and cached instead of on every poll.
+- Default cloud poll interval is now 300 s.
+
+### Fixed
+- `pecron.set_property` reported failures using a non-existent `result.message` attribute.
+
 ## [0.6.1] - 2026-07-30
 
 ### Fixed

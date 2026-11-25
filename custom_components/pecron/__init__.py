@@ -1,30 +1,21 @@
 """Pecron Home Assistant integration."""
 
-import asyncio
 import logging
-from datetime import timedelta
 from typing import Final
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from unofficial_pecron_api import PecronAPI
 
 from .const import (
     ATTR_PROPERTY_CODE,
     ATTR_VALUE,
-    CONF_EMAIL,
-    CONF_PASSWORD,
-    CONF_REFRESH_INTERVAL,
-    CONF_REGION,
-    DEFAULT_REFRESH_INTERVAL,
-    DEFAULT_REGION,
     DOMAIN,
     SERVICE_SET_PROPERTY,
 )
+from .coordinator import PecronDataUpdateCoordinator
+from .transport import TransportError
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: Final = ["sensor", "binary_sensor", "switch", "select"]
@@ -34,53 +25,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Pecron from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    email = entry.data[CONF_EMAIL]
-    password = entry.data[CONF_PASSWORD]
-    region = entry.data.get(CONF_REGION, DEFAULT_REGION)
-    # Check options first, then fall back to data for refresh interval
-    refresh_interval = entry.options.get(
-        CONF_REFRESH_INTERVAL,
-        entry.data.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),
-    )
+    coordinator = PecronDataUpdateCoordinator(hass, entry)
 
-    coordinator = PecronDataUpdateCoordinator(
-        hass, entry, email, password, region, refresh_interval
-    )
-
-    # Attempt initial refresh with retry logic
-    max_retries = 3
-    retry_delay = 5  # seconds
-
-    for attempt in range(max_retries):
-        try:
-            await coordinator.async_config_entry_first_refresh()
-            break  # Success, exit retry loop
-        except UpdateFailed as err:
-            if attempt < max_retries - 1:
-                _LOGGER.warning(
-                    "Initial data fetch failed (attempt %d/%d): %s. Retrying in %d seconds...",
-                    attempt + 1,
-                    max_retries,
-                    err,
-                    retry_delay,
-                )
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-            else:
-                _LOGGER.error(
-                    "Failed to fetch initial data after %d attempts. Setup will continue but integration may not work correctly.",
-                    max_retries,
-                )
-                # Show notification about the failure
-                persistent_notification.async_create(
-                    hass,
-                    f"Failed to connect to Pecron API after {max_retries} attempts. "
-                    "Please check your internet connection and credentials, then reload the integration.",
-                    title="Pecron: Connection Failed",
-                    notification_id=f"{DOMAIN}_connection_failed_{entry.entry_id}",
-                )
-                # Allow setup to continue so user can reload later
-                break
+    # Raises ConfigEntryNotReady on failure; Home Assistant retries setup.
+    await coordinator.async_config_entry_first_refresh()
 
     # Show persistent notification if no devices found
     if coordinator.data is not None and not coordinator.data:
@@ -184,56 +132,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return
 
-        # Call the API
-        if not coordinator.api:
-            _LOGGER.error("API not available")
-            return
-
         try:
-            result = await hass.async_add_executor_job(
-                coordinator.api.set_device_property,
-                device,
-                {property_code: value},
-            )
-
-            if result.success:
-                _LOGGER.info(
-                    "Successfully set property '%s' to '%s' for device %s",
-                    property_code,
-                    value,
-                    device.device_name,
-                )
-                # Trigger coordinator refresh to update entity states
-                await coordinator.async_request_refresh()
-            else:
-                _LOGGER.error(
-                    "Failed to set property '%s' for device %s: %s",
-                    property_code,
-                    device.device_name,
-                    result.message or "Unknown error",
-                )
-                persistent_notification.async_create(
-                    hass,
-                    f"Failed to set property '{property_code}' on {device.device_name}: "
-                    f"{result.message or 'Unknown error'}",
-                    title="Pecron: Property Set Failed",
-                    notification_id=f"{DOMAIN}_set_property_failed_{device_key}",
-                )
-
-        except Exception as err:
+            used = await coordinator.async_set_property(device_key, property_code, value)
+        except TransportError as err:
             _LOGGER.error(
-                "Error setting property '%s' for device %s: %s",
+                "Failed to set property '%s' for device %s: %s",
                 property_code,
                 device.device_name,
                 err,
-                exc_info=True,
             )
             persistent_notification.async_create(
                 hass,
-                f"Error setting property '{property_code}' on {device.device_name}: {err}",
-                title="Pecron: Service Error",
-                notification_id=f"{DOMAIN}_set_property_error_{device_key}",
+                f"Failed to set property '{property_code}' on {device.device_name}: {err}",
+                title="Pecron: Property Set Failed",
+                notification_id=f"{DOMAIN}_set_property_failed_{device_key}",
             )
+            return
+        _LOGGER.info(
+            "Set property '%s' to '%s' for device %s via %s",
+            property_code,
+            value,
+            device.device_name,
+            used,
+        )
 
     # Register the service (only once for the first config entry)
     if not hass.services.has_service(DOMAIN, SERVICE_SET_PROPERTY):
@@ -250,7 +171,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry when options change."""
+    """Reload when the options change.
+
+    The coordinator also updates ``entry.data`` to cache discovered hosts,
+    TSL and auth keys; those updates must not trigger a reload.
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and dict(entry.options) == coordinator.options_snapshot:
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -267,242 +195,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_SET_PROPERTY)
 
     return unload_ok
-
-
-class PecronDataUpdateCoordinator(DataUpdateCoordinator):
-    """Update coordinator for Pecron data."""
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        config_entry: ConfigEntry,
-        email: str,
-        password: str,
-        region: str,
-        refresh_interval: int,
-    ) -> None:
-        """Initialize the coordinator."""
-        self.email = email
-        self.password = password
-        self.region = region
-        self.api: PecronAPI | None = None
-        self.devices = []
-        self.known_device_keys: set[str] = set()  # Track devices we've seen
-
-        super().__init__(
-            hass,
-            _LOGGER,
-            config_entry=config_entry,
-            name=DOMAIN,
-            update_interval=timedelta(seconds=refresh_interval),
-        )
-
-    async def _async_update_data(self) -> dict:
-        """Fetch data from Pecron API."""
-        max_retries = 2
-        last_error = None
-
-        for attempt in range(max_retries):
-            try:
-                return await self.hass.async_add_executor_job(self._fetch_data)
-            except Exception as err:
-                last_error = err
-                error_str = str(err).lower()
-                # Differentiate error types for better diagnostics
-                if (
-                    "authentication" in error_str
-                    or "401" in error_str
-                    or "unauthorized" in error_str
-                    or "5032" in error_str
-                    or "token" in error_str
-                ):
-                    if attempt < max_retries - 1:
-                        # Token likely expired - reset API to force re-login on next attempt
-                        _LOGGER.warning(
-                            "Authentication failed for Pecron account %s (attempt %d/%d). "
-                            "Token may have expired - will refresh and retry.",
-                            self.email,
-                            attempt + 1,
-                            max_retries,
-                        )
-                        self.api = None
-                        continue  # Retry
-                    else:
-                        _LOGGER.error(
-                            "Authentication failed for Pecron account %s after %d attempts. "
-                            "Please check credentials.",
-                            self.email,
-                            max_retries,
-                        )
-                        raise UpdateFailed(f"Authentication failed: {err}") from err
-                elif "connection" in error_str or "timeout" in error_str or "network" in error_str:
-                    _LOGGER.warning("Connection error while communicating with Pecron API: %s", err)
-                    raise UpdateFailed(f"Connection error: {err}") from err
-                else:
-                    _LOGGER.error(
-                        "Unexpected error communicating with Pecron API: %s", err, exc_info=True
-                    )
-                    raise UpdateFailed(f"Error communicating with Pecron API: {err}") from err
-
-        # If we exhausted retries without raising, raise the last error
-        if last_error:
-            raise UpdateFailed(f"Failed after {max_retries} attempts: {last_error}") from last_error
-
-        return {}
-
-    def _fetch_data(self) -> dict:
-        """Fetch device data from API."""
-        if self.api is None:
-            # Check if this is a re-initialization (token refresh) or initial setup
-            is_refresh = len(self.devices) > 0
-            if is_refresh:
-                _LOGGER.info("Refreshing Pecron API token for region: %s", self.region)
-            else:
-                _LOGGER.info("Initializing Pecron API connection for region: %s", self.region)
-
-            self.api = PecronAPI(region=self.region)
-            self.api.login(self.email, self.password)
-            self.devices = self.api.get_devices()
-
-            if is_refresh:
-                _LOGGER.info(
-                    "Token refreshed successfully. Found %d Pecron device(s) on account",
-                    len(self.devices),
-                )
-            else:
-                _LOGGER.info("Found %d Pecron device(s) on account", len(self.devices))
-
-            if not self.devices:
-                _LOGGER.warning(
-                    "No Pecron devices found on account %s. "
-                    "Please check that devices are registered in the Pecron app.",
-                    self.email,
-                )
-            else:
-                for device in self.devices:
-                    _LOGGER.info(
-                        "Discovered device: %s (key: %s, product: %s)",
-                        device.device_name,
-                        device.device_key,
-                        getattr(device, "product_name", "unknown"),
-                    )
-
-        data = {}
-        for device in self.devices:
-            try:
-                props = self.api.get_device_properties(device)
-
-                # Fetch TSL (Thing Specification Language) for capability discovery
-                tsl = None
-                try:
-                    tsl = self.api.get_product_tsl(device)
-                    _LOGGER.debug(
-                        "TSL for %s (%s): %d properties",
-                        device.device_name,
-                        device.product_name,
-                        len(tsl) if tsl else 0,
-                    )
-                    if tsl:
-                        # Log discovered capabilities
-                        readable_props = [p.code for p in tsl if not p.writable]
-                        writable_props = [p.code for p in tsl if p.writable]
-                        _LOGGER.info(
-                            "Device %s supports %d readable and %d writable properties",
-                            device.device_name,
-                            len(readable_props),
-                            len(writable_props),
-                        )
-                        _LOGGER.debug(
-                            "Readable properties: %s",
-                            readable_props,
-                        )
-                        _LOGGER.debug(
-                            "Writable properties: %s",
-                            writable_props,
-                        )
-                except Exception as tsl_err:
-                    _LOGGER.warning(
-                        "Could not fetch TSL for %s: %s. Will use all sensor definitions.",
-                        device.device_name,
-                        tsl_err,
-                    )
-
-                data[device.device_key] = {
-                    "device": device,
-                    "properties": props,
-                    "tsl": tsl,
-                }
-                _LOGGER.debug(
-                    "Successfully fetched properties for %s: %s",
-                    device.device_name,
-                    props,
-                )
-                # Log available property attributes for debugging/validation
-                if hasattr(props, "__dict__"):
-                    _LOGGER.debug(
-                        "Available properties for %s: %s",
-                        device.device_name,
-                        list(props.__dict__.keys()),
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Property attributes for %s: %s",
-                        device.device_name,
-                        dir(props),
-                    )
-            except Exception as err:
-                error_str = str(err).lower()
-                # Check if this is an authentication error that needs token refresh
-                if (
-                    "authentication" in error_str
-                    or "401" in error_str
-                    or "unauthorized" in error_str
-                    or "5032" in error_str
-                    or "token" in error_str
-                ):
-                    _LOGGER.warning(
-                        "Authentication error fetching properties for %s: %s. Token may have expired.",
-                        device.device_name,
-                        err,
-                    )
-                    # Reset API to force token refresh on next attempt
-                    self.api = None
-                    # Re-raise so retry logic in _async_update_data can handle it
-                    raise
-                else:
-                    # Non-auth errors: log and continue with other devices
-                    _LOGGER.error(
-                        "Error fetching properties for %s (key: %s): %s",
-                        device.device_name,
-                        device.device_key,
-                        err,
-                        exc_info=True,
-                    )
-
-        if data:
-            _LOGGER.debug("Successfully fetched data for %d device(s)", len(data))
-            # Check for new devices
-            new_device_keys = set(data.keys()) - self.known_device_keys
-            if new_device_keys:
-                _LOGGER.info(
-                    "Discovered %d new device(s): %s",
-                    len(new_device_keys),
-                    new_device_keys,
-                )
-                self.known_device_keys.update(new_device_keys)
-        else:
-            _LOGGER.warning("No device data could be fetched")
-
-        return data
-
-    def get_new_devices(self, existing_keys: set[str]) -> dict:
-        """Get devices that are new since the given set of keys."""
-        if not self.data:
-            return {}
-        return {key: value for key, value in self.data.items() if key not in existing_keys}
-
-    async def async_shutdown(self) -> None:
-        """Shutdown the coordinator and close API connection."""
-        if self.api is not None:
-            await self.hass.async_add_executor_job(self.api.close)
-            self.api = None

@@ -1,0 +1,128 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Pecron Account",
+        "description": "Sign in with your Pecron app account. The cloud is used once to read each station's data model and local key; after that Bluetooth and Wi-Fi work without it. You choose which connections to use, and in what order, under Configure.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "region": "Region",
+          "refresh_interval": "Cloud poll interval (seconds)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced Options",
+        "description": "Configure polling and other advanced settings",
+        "data": {
+          "refresh_interval": "Refresh interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password, or wrong region selected. Each region uses a different login server, so a correct email/password can still be rejected if your account is registered in a different region. If you're sure your credentials are correct, try a different region.",
+      "cannot_connect": "Failed to reach the Pecron API server. Check your internet connection and try again.",
+      "unknown": "An unknown error occurred"
+    },
+    "abort": {
+      "already_configured": "Pecron is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_percentage": {
+        "name": "Battery percentage"
+      },
+      "battery_voltage": {
+        "name": "Battery voltage"
+      },
+      "battery_current": {
+        "name": "Battery current"
+      },
+      "battery_power": {
+        "name": "Battery power"
+      },
+      "battery_temperature": {
+        "name": "Battery temperature"
+      },
+      "total_input_power": {
+        "name": "Input power"
+      },
+      "total_output_power": {
+        "name": "Output power"
+      },
+      "ac_input": {
+        "name": "AC input power"
+      },
+      "dc_input": {
+        "name": "DC input power"
+      },
+      "remaining_charging_time": {
+        "name": "Time to full"
+      },
+      "remaining_discharging_time": {
+        "name": "Time to empty"
+      },
+      "ac_output_voltage": {
+        "name": "AC output voltage"
+      },
+      "ac_output_power": {
+        "name": "AC output power"
+      },
+      "ac_output_frequency": {
+        "name": "AC output frequency"
+      },
+      "connection": {
+        "name": "Connection",
+        "state": {
+          "ble": "Bluetooth",
+          "tcp": "Wi-Fi",
+          "cloud": "Cloud",
+          "none": "None"
+        }
+      }
+    },
+    "select": {
+      "ac_charge_speed": {
+        "name": "AC charge speed"
+      }
+    },
+    "binary_sensor": {
+      "ac_switch": {
+        "name": "AC output"
+      },
+      "dc_switch": {
+        "name": "DC output"
+      },
+      "ups_status": {
+        "name": "UPS mode"
+      },
+      "online": {
+        "name": "Online"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Connections",
+        "description": "Each station is read over the highest-priority connection that is working. A connection that fails 3 times in a row is skipped and re-tried with increasing back-off, so a flaky link cannot cause flapping. Choose \"Not used\" to disable a connection entirely.",
+        "data": {
+          "priority_1": "1st choice",
+          "priority_2": "2nd choice",
+          "priority_3": "3rd choice",
+          "scan_interval_local": "Local poll interval (seconds)",
+          "refresh_interval": "Cloud poll interval (seconds, minimum 60 – the cloud has an account quota)"
+        }
+      },
+      "devices": {
+        "title": "Station addresses",
+        "description": "Optional fixed IP address for each station's Wi-Fi connection. Leave blank to find it on the local network automatically. Stations: {devices}"
+      }
+    },
+    "error": {
+      "no_transport": "Choose at least one connection.",
+      "duplicate_transport": "Each connection can only be chosen once."
+    }
+  }
+}

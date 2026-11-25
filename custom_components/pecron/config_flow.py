@@ -12,13 +12,19 @@ from unofficial_pecron_api import PecronAPI
 from unofficial_pecron_api.exceptions import AuthenticationError
 
 from .const import (
+    CONF_DEVICE_CACHE,
     CONF_EMAIL,
+    CONF_HOST_PREFIX,
     CONF_PASSWORD,
     CONF_REFRESH_INTERVAL,
     CONF_REGION,
+    CONF_SCAN_INTERVAL_LOCAL,
+    DEFAULT_PRIORITIES,
     DEFAULT_REFRESH_INTERVAL,
     DEFAULT_REGION,
+    DEFAULT_SCAN_INTERVAL_LOCAL,
     DOMAIN,
+    PRIORITY_KEYS,
     REGIONS,
 )
 
@@ -108,29 +114,84 @@ class PecronConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise PecronAuthError("No devices found on account")
 
 
+TRANSPORT_CHOICES = {
+    "ble": "Bluetooth (local adapter or ESPHome proxy)",
+    "tcp": "Wi-Fi (local TCP, port 6607)",
+    "cloud": "Pecron cloud",
+    "none": "Not used",
+}
+
+
 class PecronOptionsFlow(config_entries.OptionsFlow):
-    """Handle options flow for Pecron integration."""
+    """Transport priority, poll rates and per-device addresses."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Manage the options."""
+        errors: dict[str, str] = {}
+        options = self.config_entry.options
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            chosen = [user_input[k] for k in PRIORITY_KEYS if user_input[k] != "none"]
+            if not chosen:
+                errors["base"] = "no_transport"
+            elif len(set(chosen)) != len(chosen):
+                errors["base"] = "duplicate_transport"
+            else:
+                self._pending = dict(user_input)
+                if any(t in ("tcp", "ble") for t in chosen) and self._cached_devices():
+                    return await self.async_step_devices()
+                return self.async_create_entry(title="", data={**options, **self._pending})
 
-        current_refresh = self.config_entry.options.get(
+        current_cloud = options.get(
             CONF_REFRESH_INTERVAL,
             self.config_entry.data.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),
         )
-
-        options_schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_REFRESH_INTERVAL,
-                    default=current_refresh,
-                ): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
-            }
+        fields: dict[Any, Any] = {}
+        for key, default in zip(PRIORITY_KEYS, DEFAULT_PRIORITIES, strict=True):
+            fields[vol.Required(key, default=options.get(key, default))] = vol.In(TRANSPORT_CHOICES)
+        fields[
+            vol.Required(
+                CONF_SCAN_INTERVAL_LOCAL,
+                default=options.get(CONF_SCAN_INTERVAL_LOCAL, DEFAULT_SCAN_INTERVAL_LOCAL),
+            )
+        ] = vol.All(vol.Coerce(int), vol.Range(min=5, max=600))
+        fields[vol.Required(CONF_REFRESH_INTERVAL, default=current_cloud)] = vol.All(
+            vol.Coerce(int), vol.Range(min=60, max=3600)
         )
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
 
-        return self.async_show_form(step_id="init", data_schema=options_schema)
+    def _cached_devices(self) -> dict[str, dict]:
+        return dict(self.config_entry.data.get(CONF_DEVICE_CACHE, {}))
+
+    async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Optional fixed IP per station (blank = find it on the LAN automatically)."""
+        options = self.config_entry.options
+        devices = self._cached_devices()
+        if user_input is not None:
+            hosts = {
+                f"{CONF_HOST_PREFIX}{dk}": (user_input.get(dk) or "").strip()
+                for dk in devices
+            }
+            return self.async_create_entry(
+                title="", data={**options, **self._pending, **hosts}
+            )
+        fields = {
+            vol.Optional(
+                dk,
+                description={
+                    "suggested_value": options.get(f"{CONF_HOST_PREFIX}{dk}")
+                    or cached.get("host", "")
+                },
+            ): str
+            for dk, cached in devices.items()
+        }
+        names = ", ".join(f"{c.get('name', dk)} = {dk}" for dk, c in devices.items())
+        return self.async_show_form(
+            step_id="devices",
+            data_schema=vol.Schema(fields),
+            description_placeholders={"devices": names},
+        )
 
 
 class PecronAuthError(HomeAssistantError):

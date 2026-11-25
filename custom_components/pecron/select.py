@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN
+from .transport import TransportError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class PecronSelectDescription(SelectEntityDescription):
     """Describe a Pecron select entity."""
 
     api_method: str | None = None
+    property_code: str | None = None  # TSL code written through the active transport
     option_map: dict[str, str] = field(default_factory=dict)
 
 
@@ -57,9 +59,13 @@ def _build_select_from_tsl(tsl_prop) -> tuple[PecronSelectDescription, dict[str,
         return None
 
     if tsl_prop.enum_values:
-        options = [f"{ev.name}%" for ev in tsl_prop.enum_values]
-        option_map = {f"{ev.name}%": str(ev.value) for ev in tsl_prop.enum_values}
-        value_to_label = {str(ev.value): f"{ev.name}%" for ev in tsl_prop.enum_values}
+
+        def label(name: str) -> str:
+            return name if name.endswith("%") else f"{name}%"
+
+        options = [label(ev.name) for ev in tsl_prop.enum_values]
+        option_map = {label(ev.name): str(ev.value) for ev in tsl_prop.enum_values}
+        value_to_label = {str(ev.value): label(ev.name) for ev in tsl_prop.enum_values}
     else:
         # TSL property exists but has no enum specs — use fallback
         fb = _FALLBACK_OPTIONS[defn["key"]]
@@ -71,6 +77,7 @@ def _build_select_from_tsl(tsl_prop) -> tuple[PecronSelectDescription, dict[str,
         key=defn["key"],
         name=defn["name"],
         api_method=defn["api_method"],
+        property_code=tsl_prop.code,
         icon=defn["icon"],
         options=options,
         option_map=option_map,
@@ -80,12 +87,13 @@ def _build_select_from_tsl(tsl_prop) -> tuple[PecronSelectDescription, dict[str,
 def _build_fallback_selects() -> list[tuple[PecronSelectDescription, dict[str, str]]]:
     """Build select descriptions using hardcoded fallback options (no TSL available)."""
     result = []
-    for defn in _TSL_SELECT_DEFS.values():
+    for code, defn in _TSL_SELECT_DEFS.items():
         fb = _FALLBACK_OPTIONS[defn["key"]]
         desc = PecronSelectDescription(
             key=defn["key"],
             name=defn["name"],
             api_method=defn["api_method"],
+            property_code=code,
             icon=defn["icon"],
             options=fb["options"],
             option_map=fb["option_map"],
@@ -242,29 +250,17 @@ class PecronSelect(CoordinatorEntity, SelectEntity):
         if value is None:
             return None
 
-        return self._value_to_label.get(str(value), str(value))
+        label = self._value_to_label.get(str(value))
+        if label is None and f"{value}%" in (self.options or []):
+            # Some models report the percentage itself rather than the enum index.
+            label = f"{value}%"
+        return label or str(value)
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
-        api = self.coordinator.api
-        if api is None:
-            _LOGGER.error("API not available for %s", self._attr_name)
-            persistent_notification.async_create(
-                self.hass,
-                f"Failed to control {self._attr_name}: API not initialized",
-                title="Pecron: Control Failed",
-                notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
-            )
-            return
-
-        method_name = self.entity_description.api_method
-        if not method_name:
-            _LOGGER.error("No API method defined for %s", self._attr_name)
-            return
-
-        method = getattr(api, method_name, None)
-        if not method:
-            _LOGGER.error("API method %s not found", method_name)
+        code = self.entity_description.property_code
+        if not code:
+            _LOGGER.error("No property code defined for %s", self._attr_name)
             return
 
         # Convert display label to API value
@@ -277,50 +273,27 @@ class PecronSelect(CoordinatorEntity, SelectEntity):
         self.async_write_ha_state()
 
         try:
-            result = await self.hass.async_add_executor_job(method, self._device, api_value)
-
-            if not result.success:
-                _LOGGER.error(
-                    "Failed to set %s to %s: %s",
-                    self._attr_name,
-                    option,
-                    result.error_message or "Unknown error",
-                )
-                self._attr_current_option = old_option
-                self.async_write_ha_state()
-                persistent_notification.async_create(
-                    self.hass,
-                    f"Failed to set {self._attr_name} to {option}: "
-                    f"{result.error_message or 'Unknown error'}",
-                    title="Pecron: Control Failed",
-                    notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
-                )
-            else:
-                _LOGGER.info("Successfully set %s to %s", self._attr_name, option)
-                await self.coordinator.async_request_refresh()
-
-                async def delayed_refresh(delay: int) -> None:
-                    """Refresh coordinator after delay."""
-                    await asyncio.sleep(delay)
-                    await self.coordinator.async_request_refresh()
-
-                asyncio.create_task(delayed_refresh(5))
-                asyncio.create_task(delayed_refresh(15))
-
-        except Exception as err:
-            _LOGGER.error(
-                "Error controlling %s: %s",
-                self._attr_name,
-                err,
-                exc_info=True,
-            )
+            await self.coordinator.async_set_property(self._device_key, code, api_value)
+        except TransportError as err:
+            _LOGGER.error("Failed to set %s to %s: %s", self._attr_name, option, err)
             self._attr_current_option = old_option
             self.async_write_ha_state()
             persistent_notification.async_create(
                 self.hass,
-                f"Error controlling {self._attr_name}: {err}",
-                title="Pecron: Control Error",
-                notification_id=f"{DOMAIN}_control_error_{self._attr_unique_id}",
+                f"Failed to set {self._attr_name} to {option}: {err}",
+                title="Pecron: Control Failed",
+                notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
+            )
+            return
+        _LOGGER.info("Successfully set %s to %s", self._attr_name, option)
+
+        async def delayed_refresh(delay: int) -> None:
+            await asyncio.sleep(delay)
+            await self.coordinator.async_request_refresh()
+
+        for delay in (5, 15):
+            self.hass.async_create_background_task(
+                delayed_refresh(delay), f"pecron_refresh_{self._attr_unique_id}_{delay}"
             )
 
     @callback
