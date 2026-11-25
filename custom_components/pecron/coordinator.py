@@ -1,0 +1,486 @@
+"""Coordinator: per-device transport selection with health tracking and failover.
+
+Every enabled transport (BLE, Wi-Fi TCP, cloud) has its own health state,
+evaluated on every poll and exposed as an entity. A priority selector uses
+the highest-priority transport that is not marked down; a transport is
+demoted after ``LINK_FAIL_LIMIT`` consecutive failures and then only
+re-probed with exponential backoff, so a flaky link cannot cause flapping.
+A failure on one poll falls through to the next transport immediately, so
+data keeps flowing while the primary recovers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from unofficial_pecron_api.models import Device, DeviceProperties, TslProperty
+
+from .const import (
+    CONF_DEVICE_CACHE,
+    CONF_EMAIL,
+    CONF_HOST_PREFIX,
+    CONF_PASSWORD,
+    CONF_REFRESH_INTERVAL,
+    CONF_REGION,
+    CONF_SCAN_INTERVAL_LOCAL,
+    DEFAULT_PRIORITIES,
+    DEFAULT_REFRESH_INTERVAL,
+    DEFAULT_REGION,
+    DEFAULT_SCAN_INTERVAL_LOCAL,
+    DOMAIN,
+    LINK_FAIL_LIMIT,
+    LINK_PROBE_BACKOFF_MAX,
+    LINK_PROBE_BACKOFF_START,
+    PRIORITY_KEYS,
+    STALE_POLL_LIMIT,
+)
+from .transport import (
+    ALL_TRANSPORTS,
+    TRANSPORT_BLE,
+    TRANSPORT_CLOUD,
+    TRANSPORT_TCP,
+    Transport,
+    TransportError,
+)
+from .transport.cloud import CloudAccount, CloudTransport
+from .tsl_map import TslMap, to_tsl_info
+
+_LOGGER = logging.getLogger(__name__)
+
+READ_TIMEOUT = {TRANSPORT_BLE: 30.0, TRANSPORT_TCP: 25.0, TRANSPORT_CLOUD: 30.0}
+
+
+def configured_priorities(entry: ConfigEntry) -> list[str]:
+    """Ordered, de-duplicated list of enabled transports from the options."""
+    order: list[str] = []
+    for key, default in zip(PRIORITY_KEYS, DEFAULT_PRIORITIES, strict=True):
+        value = entry.options.get(key, default)
+        if value in ALL_TRANSPORTS and value not in order:
+            order.append(value)
+    return order
+
+
+@dataclass
+class LinkHealth:
+    """Health of one transport to one device (observable, fail-safe)."""
+
+    name: str
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    down: bool = False
+    last_error: str | None = None
+    last_success: float | None = None
+    next_probe: float = 0.0
+    backoff: float = LINK_PROBE_BACKOFF_START
+
+    def eligible(self, now: float) -> bool:
+        return not self.down or now >= self.next_probe
+
+    def success(self, now: float) -> None:
+        if self.down:
+            _LOGGER.info("Link %s recovered", self.name)
+        self.consecutive_failures = 0
+        self.down = False
+        self.last_error = None
+        self.last_success = now
+        self.backoff = LINK_PROBE_BACKOFF_START
+
+    def failure(self, now: float, error: str) -> None:
+        self.consecutive_failures += 1
+        self.total_failures += 1
+        self.last_error = error
+        if self.down:
+            self.backoff = min(self.backoff * 2, LINK_PROBE_BACKOFF_MAX)
+            self.next_probe = now + self.backoff
+        elif self.consecutive_failures >= LINK_FAIL_LIMIT:
+            _LOGGER.warning(
+                "Link %s marked down after %d failures: %s",
+                self.name,
+                self.consecutive_failures,
+                error,
+            )
+            self.down = True
+            self.next_probe = now + self.backoff
+
+    @property
+    def state(self) -> str:
+        if self.down:
+            return "down"
+        if self.consecutive_failures:
+            return "degraded"
+        if self.last_success is None:
+            return "unknown"
+        return "ok"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "consecutive_failures": self.consecutive_failures,
+            "total_failures": self.total_failures,
+            "last_error": self.last_error,
+        }
+
+
+class DeviceLink:
+    """All transports to one device plus the priority selector."""
+
+    def __init__(
+        self,
+        device: Device,
+        tsl_raw: list[dict],
+        transports: list[Transport],
+        tsl_map: TslMap | None = None,
+    ) -> None:
+        self.device = device
+        self.tsl_map = tsl_map or TslMap(tsl_raw)
+        self.tsl_props = [TslProperty.from_api(item) for item in tsl_raw] or None
+        self.transports = transports
+        self.health = {t.name: LinkHealth(t.name) for t in transports}
+        self.active: str | None = None
+        self.values: dict[str, Any] | None = None
+        self.stale_polls = 0
+
+    @property
+    def device_key(self) -> str:
+        return self.device.device_key
+
+    async def poll(self) -> dict[str, Any] | None:
+        now = time.monotonic()
+        for transport in self.transports:
+            health = self.health[transport.name]
+            if not health.eligible(now):
+                continue
+            try:
+                values = await asyncio.wait_for(
+                    transport.read(), READ_TIMEOUT.get(transport.name, 30.0)
+                )
+            except (TransportError, TimeoutError, OSError) as err:
+                health.failure(time.monotonic(), str(err) or type(err).__name__)
+                _LOGGER.debug("%s via %s failed: %s", self.device.device_name, transport.name, err)
+                continue
+            health.success(time.monotonic())
+            if self.active != transport.name:
+                _LOGGER.info("%s: using %s", self.device.device_name, transport.name)
+            self.active = transport.name
+            self.values = values
+            self.stale_polls = 0
+            return values
+        self.active = None
+        self.stale_polls += 1
+        return None
+
+    async def write(self, code: str, value: Any) -> str:
+        """Write via the active transport first, then any other healthy one."""
+        order = sorted(
+            self.transports, key=lambda t: (t.name != self.active, self.health[t.name].down)
+        )
+        errors = []
+        for transport in order:
+            if self.health[transport.name].down:
+                continue
+            try:
+                await transport.write(code, value)
+                return transport.name
+            except TransportError as err:
+                errors.append(f"{transport.name}: {err}")
+        raise TransportError("; ".join(errors) or "no usable transport")
+
+    def snapshot(self) -> dict[str, Any] | None:
+        if self.values is None or self.stale_polls > STALE_POLL_LIMIT:
+            return None
+        props = DeviceProperties.from_api(to_tsl_info(self.values, self.tsl_map))
+        return {
+            "device": self.device,
+            "properties": props,
+            "tsl": self.tsl_props,
+            "values": self.values,
+            "transport": self.active,
+        }
+
+    async def close(self) -> None:
+        for transport in self.transports:
+            try:
+                await transport.close()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("closing %s: %s", transport.name, err)
+
+
+def _device_from_cache(device_key: str, cached: dict) -> Device:
+    return Device(
+        device_name=cached.get("name", device_key),
+        product_key=cached.get("product_key", ""),
+        device_key=device_key,
+        product_name=cached.get("product_name", ""),
+        online=True,
+        protocol="",
+    )
+
+
+class PecronDataUpdateCoordinator(DataUpdateCoordinator):
+    """Owns the cloud account and one DeviceLink per station."""
+
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+        self.entry = config_entry
+        self.options_snapshot = dict(config_entry.options)
+        self.priorities = configured_priorities(config_entry)
+        self.local_interval = int(
+            config_entry.options.get(CONF_SCAN_INTERVAL_LOCAL, DEFAULT_SCAN_INTERVAL_LOCAL)
+        )
+        self.cloud_interval = int(
+            config_entry.options.get(
+                CONF_REFRESH_INTERVAL,
+                config_entry.data.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),
+            )
+        )
+        uses_local = any(p in (TRANSPORT_BLE, TRANSPORT_TCP) for p in self.priorities)
+        interval = self.local_interval if uses_local else self.cloud_interval
+        self.account = CloudAccount(
+            hass,
+            config_entry.data[CONF_EMAIL],
+            config_entry.data[CONF_PASSWORD],
+            config_entry.data.get(CONF_REGION, DEFAULT_REGION),
+        )
+        self.links: dict[str, DeviceLink] = {}
+        self.known_device_keys: set[str] = set()
+        self._bootstrapped = False
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=config_entry,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=interval),
+        )
+
+    # -- compatibility with platform code ------------------------------------
+
+    @property
+    def api(self):
+        return self.account.api
+
+    @property
+    def devices(self) -> list[Device]:
+        return [link.device for link in self.links.values()]
+
+    # -- bootstrap ------------------------------------------------------------
+
+    async def _bootstrap(self) -> None:
+        cache: dict[str, dict] = {
+            k: dict(v) for k, v in self.entry.data.get(CONF_DEVICE_CACHE, {}).items()
+        }
+        changed = False
+        wants_local = any(p in (TRANSPORT_BLE, TRANSPORT_TCP) for p in self.priorities)
+        devices: list[Device]
+        try:
+            devices = await self.account.async_login()
+        except Exception as err:
+            if not cache:
+                raise UpdateFailed(
+                    f"Cannot reach the Pecron cloud and no cached devices: {err}"
+                ) from err
+            _LOGGER.warning("Pecron cloud unavailable (%s); starting from cached device data", err)
+            devices = [_device_from_cache(dk, c) for dk, c in cache.items()]
+        else:
+            for device in devices:
+                entry = cache.setdefault(device.device_key, {})
+                meta = {
+                    "name": device.device_name,
+                    "product_key": device.product_key,
+                    "product_name": device.product_name,
+                }
+                if any(entry.get(k) != v for k, v in meta.items()):
+                    entry.update(meta)
+                    changed = True
+                if not entry.get("tsl"):
+                    try:
+                        entry["tsl"] = await self.account.async_raw_tsl(device)
+                        changed = True
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning("Could not fetch TSL for %s: %s", device.device_name, err)
+                if wants_local and not entry.get("auth_key"):
+                    try:
+                        entry["auth_key"] = await self.account.async_auth_key(device)
+                        changed = True
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "No local auth key for %s (%s); local transports disabled for it",
+                            device.device_name,
+                            err,
+                        )
+
+        for device in devices:
+            self.links[device.device_key] = self._build_link(
+                device, cache.get(device.device_key, {})
+            )
+        if changed:
+            self._save_cache(cache)
+        self._bootstrapped = True
+
+    def _build_link(self, device: Device, cached: dict) -> DeviceLink:
+        transports: list[Transport] = []
+        auth_key = cached.get("auth_key")
+        tsl_map = TslMap(cached.get("tsl", []))
+        for name in self.priorities:
+            if name == TRANSPORT_CLOUD:
+                transports.append(CloudTransport(self.account, device, self.cloud_interval))
+            elif name == TRANSPORT_TCP and auth_key:
+                host = self.entry.options.get(
+                    f"{CONF_HOST_PREFIX}{device.device_key}"
+                ) or cached.get("host")
+                transports.append(_DiscoveringTcp(self, device.device_key, host, auth_key, tsl_map))
+            elif name == TRANSPORT_BLE and auth_key:
+                from .transport.ble import BleTransport
+
+                transports.append(
+                    BleTransport(
+                        self.hass, cached.get("ble_address"), device.device_key, auth_key, tsl_map
+                    )
+                )
+        return DeviceLink(device, cached.get("tsl", []), transports, tsl_map)
+
+    def _save_cache(self, cache: dict[str, dict]) -> None:
+        data = dict(self.entry.data)
+        data[CONF_DEVICE_CACHE] = cache
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+
+    def remember(self, device_key: str, **values: Any) -> None:
+        """Persist discovered per-device details (host, BLE address)."""
+        cache = {k: dict(v) for k, v in self.entry.data.get(CONF_DEVICE_CACHE, {}).items()}
+        entry = cache.setdefault(device_key, {})
+        if all(entry.get(k) == v for k, v in values.items()):
+            return
+        entry.update(values)
+        self._save_cache(cache)
+
+    # -- polling ----------------------------------------------------------------
+
+    async def _async_update_data(self) -> dict:
+        if not self._bootstrapped:
+            await self._bootstrap()
+        if not self.links:
+            return {}
+        links = list(self.links.values())
+        await asyncio.gather(*(link.poll() for link in links))
+        data = {}
+        for link in links:
+            snap = link.snapshot()
+            if snap is not None:
+                data[link.device_key] = snap
+            if link.active == TRANSPORT_BLE:
+                ble = next(t for t in link.transports if t.name == TRANSPORT_BLE)
+                address = getattr(ble, "address", None)
+                if address:
+                    self.remember(link.device_key, ble_address=address)
+        if not data:
+            errors = {
+                link.device.device_name: {n: h.last_error for n, h in link.health.items()}
+                for link in links
+            }
+            raise UpdateFailed(f"No transport could reach any station: {errors}")
+        self.known_device_keys.update(data)
+        return data
+
+    async def async_set_property(self, device_key: str, code: str, value: Any) -> str:
+        """Write one property; returns the transport used. Raises TransportError."""
+        link = self.links.get(device_key)
+        if link is None:
+            raise TransportError(f"unknown device {device_key}")
+        used = await link.write(code, value)
+        await self.async_request_refresh()
+        return used
+
+    def get_new_devices(self, existing_keys: set[str]) -> dict:
+        if not self.data:
+            return {}
+        return {key: value for key, value in self.data.items() if key not in existing_keys}
+
+    async def async_shutdown(self) -> None:
+        await super().async_shutdown()
+        for link in self.links.values():
+            await link.close()
+        await self.account.async_close()
+
+
+def _make_tcp_base():
+    from .transport.tcp import TcpTransport
+
+    return TcpTransport
+
+
+class _DiscoveringTcp(Transport):
+    """TCP transport that finds the station on the LAN when no host is known."""
+
+    name = TRANSPORT_TCP
+
+    def __init__(
+        self,
+        coordinator: PecronDataUpdateCoordinator,
+        device_key: str,
+        host: str | None,
+        auth_key: str,
+        tsl_map: TslMap,
+    ) -> None:
+        self.coordinator = coordinator
+        self.device_key = device_key
+        self.auth_key = auth_key
+        self.tsl_map = tsl_map
+        self._inner = _make_tcp_base()(host, device_key, auth_key, tsl_map) if host else None
+        self._next_scan = 0.0
+        self._scan: asyncio.Task | None = None
+
+    async def _resolve(self) -> None:
+        if self._inner is not None:
+            return
+        if self._scan is None or self._scan.done():
+            if self._scan is not None and self._scan.done():
+                host = (
+                    None
+                    if self._scan.cancelled() or self._scan.exception()
+                    else self._scan.result()
+                )
+                self._scan = None
+                if host:
+                    self.coordinator.remember(self.device_key, host=host)
+                    self._inner = _make_tcp_base()(
+                        host, self.device_key, self.auth_key, self.tsl_map
+                    )
+                    return
+                self._next_scan = time.monotonic() + LINK_PROBE_BACKOFF_MAX
+            if time.monotonic() >= self._next_scan:
+                self._scan = self.coordinator.hass.async_create_background_task(
+                    self._discover(), f"pecron_lan_scan_{self.device_key}"
+                )
+        raise TransportError(
+            "station not located on the LAN yet (searching, or set its IP in the options)"
+        )
+
+    async def _discover(self) -> str | None:
+        from homeassistant.components import network
+
+        from .transport.tcp import discover_host
+
+        source_ip = await network.async_get_source_ip(self.coordinator.hass)
+        return await discover_host(source_ip, self.auth_key)
+
+    async def read(self) -> dict[str, Any]:
+        await self._resolve()
+        assert self._inner is not None
+        return await self._inner.read()
+
+    async def write(self, code: str, value: Any) -> None:
+        await self._resolve()
+        assert self._inner is not None
+        await self._inner.write(code, value)
+
+    async def close(self) -> None:
+        if self._scan is not None:
+            self._scan.cancel()
+        if self._inner is not None:
+            await self._inner.close()

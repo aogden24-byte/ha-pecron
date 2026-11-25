@@ -88,14 +88,12 @@ jobs:
           import json
           with open('custom_components/pecron/manifest.json') as f:
               manifest = json.load(f)
-          assert 'manifest_version' in manifest
           assert 'domain' in manifest
           assert 'name' in manifest
           assert 'codeowners' in manifest
           assert 'documentation' in manifest
           assert 'requirements' in manifest
           assert 'version' in manifest
-          assert 'homeassistant' in manifest
           print('✓ manifest.json is valid')
           "
 

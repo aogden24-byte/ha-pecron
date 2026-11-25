@@ -9,20 +9,37 @@ A Home Assistant community integration for Pecron portable power stations. Monit
 - **Multi-device Support** - Manage multiple Pecron stations from one account
 - **Smart Entity Discovery** - Automatically creates only the entities your device supports
 - **Advanced Control Service** - `pecron.set_property` for controlling any writable device property
-- **Configurable Refresh Rate** - Adjust polling interval (1-60 minutes)
+- **Local first** - Bluetooth and Wi-Fi with automatic failover to the cloud, in the order you choose
+- **Configurable Poll Rates** - Local (from 5 s) and cloud (from 60 s) set separately
 - **Multi-region Support** - US, EU, and CN regions
 - **Automation Ready** - Create complex automations based on battery level, power usage, etc.
 
 ## How It Works
 
-This integration communicates with your Pecron device through **Pecron's cloud API** — the same backend used by the official Pecron mobile app. It does **not** connect directly to the device over your local network or Bluetooth.
+Each station is reached over up to three connections, in an order you choose:
 
-**What this means:**
-- Your Pecron device must be connected to WiFi and registered in the Pecron app
-- You use the same email/password credentials as the Pecron app
-- Home Assistant polls the cloud API at a configurable interval (1-60 minutes) for status updates
-- Device commands (e.g., turning AC/DC on/off) are sent through the cloud API
-- An active internet connection is required for both Home Assistant and the Pecron device
+| Connection | Needs | Notes |
+|---|---|---|
+| **Bluetooth** | A Bluetooth adapter or an ESPHome Bluetooth proxy in range | Fully local. Holds the station's single BLE session, so the Pecron app falls back to Wi-Fi/cloud while it is in use. |
+| **Wi-Fi** (TCP port 6607) | Station and Home Assistant on the same network | Fully local and fast. Found automatically by scanning the subnet, or set a fixed IP. |
+| **Cloud** | Internet | Same backend as the Pecron app. Polled slowly: the account has a request quota. |
+
+The integration uses the highest-priority connection that works. A connection
+that fails is skipped for that poll (data keeps flowing from the next one);
+after 3 consecutive failures it is marked down and re-tried with increasing
+back-off (1 → 15 min), then promoted back automatically when it answers. Any
+connection can be set to **Not used**. Every connection's health is exposed as
+a diagnostic entity, plus a **Connection** sensor showing which one is live.
+
+**Cloud login is needed once.** Local connections need each station's data
+model and local key, which only Pecron's cloud provides. They are cached in the
+config entry, so after setup Bluetooth and Wi-Fi keep working with no internet.
+The integration only ever *reads* the local key; it never regenerates it
+(regenerating breaks every other local tool using the station).
+
+**One client per connection.** A station accepts one Wi-Fi TCP client and one
+BLE client at a time. Do not run other local tools (pecron-monitor,
+other Pecron integrations) against the same station.
 
 **Regional endpoints:**
 - **US** (default): `iot-api.landecia.com`
@@ -34,7 +51,7 @@ This integration communicates with your Pecron device through **Pecron's cloud A
 ### Via HACS
 
 1. Go to **HACS** → **Integrations** → **Custom repositories**
-2. Add this repository: `https://github.com/jsight/ha-pecron`
+2. Add this repository: `https://github.com/aogden24-byte/ha-pecron`
 3. Select **Pecron** and click **Install**
 4. Restart Home Assistant
 5. Go to **Settings** → **Devices & Services** → **Create Integration**
@@ -43,7 +60,7 @@ This integration communicates with your Pecron device through **Pecron's cloud A
 ### Manual
 
 ```bash
-git clone https://github.com/jsight/ha-pecron.git
+git clone https://github.com/aogden24-byte/ha-pecron.git
 cp -r ha-pecron/custom_components/pecron ~/.homeassistant/custom_components/
 # Restart Home Assistant
 ```
@@ -139,3 +156,9 @@ This integration is not affiliated with or endorsed by Pecron. It uses the unoff
 ## License
 
 MIT
+
+## Credits
+
+- Cloud API: [unofficial-pecron-api](https://github.com/jsightler/unofficial-pecron-api) (MIT) and the original integration by Jesse Sightler.
+- Local protocol (TTLV framing, handshake, encryption): documented by
+  [pecron-monitor](https://github.com/attractify-logan/pecron-monitor) (MIT).

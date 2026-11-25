@@ -28,6 +28,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN
+from .link_entities import link_entities_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -247,6 +248,8 @@ async def async_setup_entry(
                 "No Pecron devices with valid data found. Check that your account has devices and they are online."
             )
 
+    if hasattr(coordinator, "links"):
+        sensors.extend(link_entities_for(coordinator, "sensor"))
     async_add_entities(sensors)
 
     # Add listener for new devices

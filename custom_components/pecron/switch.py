@@ -22,6 +22,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN
+from .transport import TransportError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class PecronSwitchDescription(SwitchEntityDescription):
     """Describe a Pecron switch."""
 
     api_method: str | None = None
+    property_code: str | None = None  # TSL code written through the active transport
 
 
 PECRON_SWITCHES = [
@@ -39,6 +41,7 @@ PECRON_SWITCHES = [
         name="AC Output",
         device_class=SwitchDeviceClass.OUTLET,
         api_method="set_ac_output",
+        property_code="ac_switch_hm",
         icon="mdi:power-socket-us",
     ),
     PecronSwitchDescription(
@@ -46,6 +49,7 @@ PECRON_SWITCHES = [
         name="DC Output",
         device_class=SwitchDeviceClass.OUTLET,
         api_method="set_dc_output",
+        property_code="dc_switch_hm",
         icon="mdi:power-socket-dc",
     ),
 ]
@@ -220,26 +224,9 @@ class PecronSwitch(CoordinatorEntity, SwitchEntity):
 
     async def _async_set_state(self, enabled: bool) -> None:
         """Set the switch state."""
-        api = self.coordinator.api
-        if api is None:
-            _LOGGER.error("API not available for %s", self._attr_name)
-            persistent_notification.async_create(
-                self.hass,
-                f"Failed to control {self._attr_name}: API not initialized",
-                title="Pecron: Control Failed",
-                notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
-            )
-            return
-
-        # Get the API method to call
-        method_name = self.entity_description.api_method
-        if not method_name:
-            _LOGGER.error("No API method defined for %s", self._attr_name)
-            return
-
-        method = getattr(api, method_name, None)
-        if not method:
-            _LOGGER.error("API method %s not found", method_name)
+        code = self.entity_description.property_code
+        if not code:
+            _LOGGER.error("No property code defined for %s", self._attr_name)
             return
 
         # Optimistic update: Set state immediately for instant UI feedback
@@ -249,66 +236,35 @@ class PecronSwitch(CoordinatorEntity, SwitchEntity):
         self.async_write_ha_state()
 
         try:
-            # Call the API method in executor
-            result = await self.hass.async_add_executor_job(method, self._device, enabled)
-
-            if not result.success:
-                _LOGGER.error(
-                    "Failed to %s %s: %s",
-                    "enable" if enabled else "disable",
-                    self._attr_name,
-                    result.message or "Unknown error",
-                )
-                # Revert optimistic update on failure
-                self._attr_is_on = old_state
-                self.async_write_ha_state()
-                persistent_notification.async_create(
-                    self.hass,
-                    f"Failed to {'turn on' if enabled else 'turn off'} {self._attr_name}: "
-                    f"{result.message or 'Unknown error'}",
-                    title="Pecron: Control Failed",
-                    notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
-                )
-            else:
-                _LOGGER.info(
-                    "Successfully %s %s",
-                    "enabled" if enabled else "disabled",
-                    self._attr_name,
-                )
-                # Request immediate refresh
-                await self.coordinator.async_request_refresh()
-
-                # Schedule additional refreshes at 5s and 15s to ensure UI syncs
-                # (Device may take time to actually change state)
-                async def delayed_refresh(delay: int) -> None:
-                    """Refresh coordinator after delay."""
-                    await asyncio.sleep(delay)
-                    _LOGGER.debug(
-                        "Delayed refresh (%ds) for %s after state change",
-                        delay,
-                        self._attr_name,
-                    )
-                    await self.coordinator.async_request_refresh()
-
-                # Create background tasks for delayed refreshes
-                asyncio.create_task(delayed_refresh(5))
-                asyncio.create_task(delayed_refresh(15))
-
-        except Exception as err:
+            await self.coordinator.async_set_property(self._device_key, code, enabled)
+        except TransportError as err:
             _LOGGER.error(
-                "Error controlling %s: %s",
+                "Failed to %s %s: %s",
+                "enable" if enabled else "disable",
                 self._attr_name,
                 err,
-                exc_info=True,
             )
-            # Revert optimistic update on error
+            # Revert optimistic update on failure
             self._attr_is_on = old_state
             self.async_write_ha_state()
             persistent_notification.async_create(
                 self.hass,
-                f"Error controlling {self._attr_name}: {err}",
-                title="Pecron: Control Error",
-                notification_id=f"{DOMAIN}_control_error_{self._attr_unique_id}",
+                f"Failed to {'turn on' if enabled else 'turn off'} {self._attr_name}: {err}",
+                title="Pecron: Control Failed",
+                notification_id=f"{DOMAIN}_control_failed_{self._attr_unique_id}",
+            )
+            return
+        _LOGGER.info("Successfully %s %s", "enabled" if enabled else "disabled", self._attr_name)
+
+        # The device can take a few seconds to report the new state; refresh
+        # again at 5 s and 15 s so the UI settles on the real value.
+        async def delayed_refresh(delay: int) -> None:
+            await asyncio.sleep(delay)
+            await self.coordinator.async_request_refresh()
+
+        for delay in (5, 15):
+            self.hass.async_create_background_task(
+                delayed_refresh(delay), f"pecron_refresh_{self._attr_unique_id}_{delay}"
             )
 
     @callback

@@ -11,7 +11,7 @@ CONF_REGION: Final = "region"
 CONF_REFRESH_INTERVAL: Final = "refresh_interval"
 
 # Defaults
-DEFAULT_REFRESH_INTERVAL: Final = 600  # 10 minutes in seconds
+DEFAULT_REFRESH_INTERVAL: Final = 300  # cloud poll floor, seconds (account quota)
 DEFAULT_REGION: Final = "US"
 
 # Supported regions
@@ -42,3 +42,21 @@ SWITCH_UPS: Final = "ups_status"
 SERVICE_SET_PROPERTY: Final = "set_property"
 ATTR_PROPERTY_CODE: Final = "property_code"
 ATTR_VALUE: Final = "value"
+
+# Transports and priority selection
+CONF_PRIORITY_1: Final = "priority_1"
+CONF_PRIORITY_2: Final = "priority_2"
+CONF_PRIORITY_3: Final = "priority_3"
+PRIORITY_KEYS: Final = (CONF_PRIORITY_1, CONF_PRIORITY_2, CONF_PRIORITY_3)
+DEFAULT_PRIORITIES: Final = ("ble", "tcp", "cloud")
+CONF_SCAN_INTERVAL_LOCAL: Final = "scan_interval_local"
+DEFAULT_SCAN_INTERVAL_LOCAL: Final = 15
+CONF_HOST_PREFIX: Final = "host_"
+CONF_DEVICE_CACHE: Final = "device_cache"
+
+# Selector tuning: a link is demoted after FAIL_LIMIT consecutive failures,
+# then only re-probed with exponential backoff until it answers again.
+LINK_FAIL_LIMIT: Final = 3
+LINK_PROBE_BACKOFF_START: Final = 60
+LINK_PROBE_BACKOFF_MAX: Final = 900
+STALE_POLL_LIMIT: Final = 3
