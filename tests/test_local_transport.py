@@ -313,4 +313,4 @@ async def test_tcp_silent_read_uses_recent_values_and_requests_fast_reports(fast
         await station.stop()
     assert second == first
     assert station.sessions == 1
-    assert ttlv.encode_num_field(100, 1) in station.writes
+    assert ttlv.encode_num_field(100, 3) in station.writes

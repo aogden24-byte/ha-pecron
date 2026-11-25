@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.8.0
+
+- Cloud push stream (as pecron-monitor): MQTT over WebSocket to the Quectel broker, subscribed to each station's `bus_` topic. Live values with no API quota; REST is only used when the stream goes quiet.
+- High-frequency reporting: requests `high_frequency_reporting = 3` via cloud every 120 s by default (configurable, 0 = off; 1 API call each).
+- Local links send the same request (value 3) every 15 s, as the Pecron app does.
+
 ## [0.7.0] - 2026-11-25
 
 ### Added

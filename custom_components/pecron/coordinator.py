@@ -19,24 +19,30 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from unofficial_pecron_api.models import Device, DeviceProperties, TslProperty
 
 from .const import (
     CONF_DEVICE_CACHE,
     CONF_EMAIL,
+    CONF_FAST_REPORT_INTERVAL,
     CONF_HOST_PREFIX,
     CONF_KEY_PREFIX,
     CONF_PASSWORD,
+    CONF_PUSH_STREAM,
     CONF_REFRESH_INTERVAL,
     CONF_REGION,
     CONF_SCAN_INTERVAL_LOCAL,
+    DEFAULT_FAST_REPORT_INTERVAL,
     DEFAULT_PRIORITIES,
+    DEFAULT_PUSH_STREAM,
     DEFAULT_REFRESH_INTERVAL,
     DEFAULT_REGION,
     DEFAULT_SCAN_INTERVAL_LOCAL,
     DOMAIN,
+    FAST_REPORT_CODE,
+    FAST_REPORT_MODE,
     LINK_FAIL_LIMIT,
     LINK_PROBE_BACKOFF_MAX,
     LINK_PROBE_BACKOFF_START,
@@ -52,6 +58,7 @@ from .transport import (
     TransportError,
 )
 from .transport.cloud import CloudAccount, CloudTransport
+from .transport.cloud_stream import CloudStream, coerce_kv
 from .tsl_map import TslMap, to_tsl_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -242,7 +249,17 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
             )
         )
         uses_local = any(p in (TRANSPORT_BLE, TRANSPORT_TCP) for p in self.priorities)
-        interval = self.local_interval if uses_local else self.cloud_interval
+        self.push_enabled = TRANSPORT_CLOUD in self.priorities and bool(
+            config_entry.options.get(CONF_PUSH_STREAM, DEFAULT_PUSH_STREAM)
+        )
+        self.fast_report_interval = int(
+            config_entry.options.get(CONF_FAST_REPORT_INTERVAL, DEFAULT_FAST_REPORT_INTERVAL)
+        )
+        self.stream: CloudStream | None = None
+        self._fast_report_unsub = None
+        # Reading pushed values costs nothing, so poll at the local rate.
+        fast = uses_local or self.push_enabled
+        interval = self.local_interval if fast else self.cloud_interval
         self.account = CloudAccount(
             hass,
             config_entry.data[CONF_EMAIL],
@@ -328,6 +345,8 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
         if changed:
             self._save_cache(cache)
         self._bootstrapped = True
+        if self.push_enabled:
+            await self._start_stream()
 
     def _build_link(self, device: Device, cached: dict) -> DeviceLink:
         transports: list[Transport] = []
@@ -337,7 +356,14 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
         tsl_map = TslMap(cached.get("tsl", []))
         for name in self.priorities:
             if name == TRANSPORT_CLOUD:
-                transports.append(CloudTransport(self.account, device, self.cloud_interval))
+                transports.append(
+                    CloudTransport(
+                        self.account,
+                        device,
+                        self.cloud_interval,
+                        push_fresh=self.cloud_interval if self.push_enabled else 0.0,
+                    )
+                )
             elif name in (TRANSPORT_TCP, TRANSPORT_BLE) and not auth_key:
                 # Keep the link visible (as failing, with the reason) rather than
                 # silently dropping it.
@@ -415,7 +441,75 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
             return {}
         return {key: value for key, value in self.data.items() if key not in existing_keys}
 
+    # -- cloud push stream (pecron-monitor's fast path) -------------------------
+
+    async def _start_stream(self) -> None:
+        stream = CloudStream(
+            self.account.region,
+            self.account.token,
+            lambda dk, kv: self.hass.loop.call_soon_threadsafe(self._on_push, dk, kv),
+        )
+        for link in self.links.values():
+            stream.add_device(link.device.product_key, link.device_key)
+        try:
+            await self.hass.async_add_executor_job(stream.start)
+        except Exception as err:  # noqa: BLE001 - REST polling still works
+            _LOGGER.warning("Pecron push stream unavailable: %s", err)
+            return
+        self.stream = stream
+        if self.fast_report_interval > 0:
+            from homeassistant.helpers.event import async_track_time_interval
+
+            self._fast_report_unsub = async_track_time_interval(
+                self.hass, self._request_fast_reports, timedelta(seconds=self.fast_report_interval)
+            )
+            self.hass.async_create_task(self._request_fast_reports())
+
+    async def _request_fast_reports(self, _now=None) -> None:
+        """Ask each station to report every few seconds (1 cloud request each)."""
+        for link in self.links.values():
+            if FAST_REPORT_CODE not in link.tsl_map.by_code and link.tsl_map.by_code:
+                continue
+            try:
+                await self.account.async_call(
+                    "set_device_property", link.device, {FAST_REPORT_CODE: FAST_REPORT_MODE}
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("high-frequency request for %s failed: %s", link.device_key, err)
+
+    @callback
+    def _on_push(self, device_key: str, kv: dict[str, Any]) -> None:
+        link = self.links.get(device_key)
+        if link is None:
+            return
+        cloud = next((t for t in link.transports if t.name == TRANSPORT_CLOUD), None)
+        if not isinstance(cloud, CloudTransport):
+            return
+        types = {code: e.data_type for code, e in link.tsl_map.by_code.items()}
+        values = cloud.apply_push(coerce_kv(kv, types))
+        # Only take over the entities if no higher-priority link is delivering.
+        if link.active not in (None, TRANSPORT_CLOUD):
+            return
+        link.values = values
+        link.active = TRANSPORT_CLOUD
+        link.stale_polls = 0
+        link.health[TRANSPORT_CLOUD].success(time.monotonic())
+        snap = link.snapshot()
+        if snap is None:
+            return
+        data = dict(self.data or {})
+        data[device_key] = snap
+        # Update entities without resetting the poll timer.
+        self.data = data
+        self.async_update_listeners()
+
     async def async_shutdown(self) -> None:
+        if self._fast_report_unsub is not None:
+            self._fast_report_unsub()
+            self._fast_report_unsub = None
+        if self.stream is not None:
+            await self.hass.async_add_executor_job(self.stream.stop)
+            self.stream = None
         await super().async_shutdown()
         for link in self.links.values():
             await link.close()

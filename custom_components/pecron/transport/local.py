@@ -26,8 +26,8 @@ POST_LOGIN_DELAY = 0.5  # some firmware drops reads sent immediately after login
 # high_frequency_reporting: 0 infrequent, 1 LAN, 2 Wi-Fi, 3 both). The
 # station reverts it on its own, so it is re-sent periodically.
 FAST_REPORT_PID = 100
-FAST_REPORT_VALUE = 1
-FAST_REPORT_EVERY = 60.0
+FAST_REPORT_VALUE = 3  # LAN + Wi-Fi, as the Pecron app sends
+FAST_REPORT_EVERY = 15.0  # the app re-sends every 15-20 s
 # How long values pushed by the station stay valid when a read gets no reply.
 PUSH_GRACE = 600.0
 LINK_CLOSED = -1  # sentinel frame command queued when the link drops

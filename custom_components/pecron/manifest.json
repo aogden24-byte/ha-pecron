@@ -12,14 +12,15 @@
     "network"
   ],
   "documentation": "https://github.com/aogden24-byte/ha-pecron",
-  "iot_class": "local_polling",
+  "iot_class": "local_push",
   "issue_tracker": "https://github.com/aogden24-byte/ha-pecron/issues",
   "loggers": [
     "custom_components.pecron",
     "unofficial_pecron_api"
   ],
   "requirements": [
-    "unofficial-pecron-api==0.4.1"
+    "unofficial-pecron-api==0.4.1",
+    "paho-mqtt>=2.0.0"
   ],
-  "version": "0.7.6"
+  "version": "0.8.0"
 }
