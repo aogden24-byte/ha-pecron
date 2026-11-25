@@ -66,12 +66,42 @@ def test_non_auth_error_keeps_session() -> None:
     assert account.api is api
 
 
-def test_auth_key_never_regenerates() -> None:
-    account = _account()
+def _key_api(get_ok: bool):
+    from unofficial_pecron_api.exceptions import PecronAPIError
+
     api = MagicMock()
-    api._request.return_value = {"authKey": "abc"}
-    account.api = api
-    assert account._auth_key("pk", "dk") == "abc"
-    paths = [c.args[1] for c in api._request.call_args_list]
-    assert paths == ["/v2/binding/enduserapi/getAuthKey"]
+
+    def request(method, path, **kw):
+        if path.endswith("getAuthKey"):
+            if get_ok:
+                return {"authKey": "readkey"}
+            raise PecronAPIError("not supported", code=5000)
+        if path.endswith("regenerateAuthKey"):
+            return {"authKey": "newkey"}
+        raise AssertionError(path)
+
+    api._request.side_effect = request
+    return api
+
+
+def test_auth_key_read_only_by_default() -> None:
+    from unofficial_pecron_api.exceptions import PecronAPIError
+
+    account = _account()
+    account.api = _key_api(get_ok=False)
+    with pytest.raises(PecronAPIError):
+        account._auth_key("pk", "dk")
+    paths = [c.args[1] for c in account.api._request.call_args_list]
     assert not any("regenerate" in p for p in paths)
+
+
+def test_auth_key_prefers_get() -> None:
+    account = _account()
+    account.api = _key_api(get_ok=True)
+    assert account._auth_key("pk", "dk", allow_regenerate=True) == "readkey"
+
+
+def test_auth_key_regenerates_only_when_allowed() -> None:
+    account = _account()
+    account.api = _key_api(get_ok=False)
+    assert account._auth_key("pk", "dk", allow_regenerate=True) == "newkey"
