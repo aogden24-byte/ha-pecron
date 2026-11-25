@@ -142,6 +142,8 @@ class PecronOptionsFlow(config_entries.OptionsFlow):
                 errors["base"] = "no_transport"
             elif len(set(chosen)) != len(chosen):
                 errors["base"] = "duplicate_transport"
+            elif 0 < int(user_input.get(CONF_FAST_REPORT_INTERVAL, 0)) < 20:
+                errors[CONF_FAST_REPORT_INTERVAL] = "fast_report_too_short"
             else:
                 self._pending = dict(user_input)
                 if any(t in ("tcp", "ble") for t in chosen) and self._cached_devices():
@@ -174,7 +176,7 @@ class PecronOptionsFlow(config_entries.OptionsFlow):
                 CONF_FAST_REPORT_INTERVAL,
                 default=options.get(CONF_FAST_REPORT_INTERVAL, DEFAULT_FAST_REPORT_INTERVAL),
             )
-        ] = vol.All(vol.Coerce(int), vol.Any(0, vol.Range(min=20, max=3600)))
+        ] = vol.All(vol.Coerce(int), vol.Range(min=0, max=3600))
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
 
     def _cached_devices(self) -> dict[str, dict]:

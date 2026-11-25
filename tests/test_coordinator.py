@@ -215,3 +215,31 @@ async def test_push_stream_updates_entities_without_rest_calls() -> None:
     coordinator.async_update_listeners.assert_called_once()
     assert data["F8D8117CB639"]["properties"].battery_percentage == 61
     assert api.get_device_properties.call_count == calls  # fresh push: no REST read
+
+
+@pytest.mark.asyncio
+async def test_link_keeps_properties_a_later_transport_omits() -> None:
+    from custom_components.pecron.coordinator import DeviceLink
+    from custom_components.pecron.transport import Transport
+
+    class Fixed(Transport):
+        def __init__(self, name, values):
+            self.name, self._values = name, values
+
+        async def read(self):
+            return self._values
+
+        async def write(self, code, value):
+            pass
+
+        async def close(self):
+            pass
+
+    link = DeviceLink(
+        DEVICE, RAW_TSL, [Fixed("cloud", {"ac_charging_power_ios": 4, "battery_percentage": 90})]
+    )
+    await link.poll()
+    link.transports = [Fixed("ble", {"battery_percentage": 93})]
+    link.health["ble"] = link.health["cloud"]
+    values = await link.poll()
+    assert values == {"ac_charging_power_ios": 4, "battery_percentage": 93}

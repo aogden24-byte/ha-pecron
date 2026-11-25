@@ -188,11 +188,11 @@ class TslMap:
         i = 0
         while i < len(fields):
             f = fields[i]
-            code = self.code_for(f.fid)
+            # Keep ids neither the TSL nor the fallback map knows, so they can be
+            # identified later (diagnostics show them as id_<n>).
+            code = self.code_for(f.fid) or f"id_{f.fid}"
             if f.kind == "STRUCT":
                 children, i = _collect(fields, i + 1, f.value)
-                if code is None:
-                    continue
                 if any(c[0].kind == "STRUCT" for c in children) or self.type_for(code) == "ARRAY":
                     out[code] = [
                         {self.sub_for(code, gc.fid): _plain(gc) for gc, _ in grand}
@@ -203,8 +203,7 @@ class TslMap:
                     out[code] = {self.sub_for(code, c.fid): _plain(c) for c, _ in children}
                 continue
             i += 1
-            if code is not None:
-                out[code] = _plain(f)
+            out[code] = _plain(f)
         return out
 
 

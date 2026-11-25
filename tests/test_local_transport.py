@@ -314,3 +314,10 @@ async def test_tcp_silent_read_uses_recent_values_and_requests_fast_reports(fast
     assert second == first
     assert station.sessions == 1
     assert ttlv.encode_num_field(100, 3) in station.writes
+
+
+def test_decode_keeps_unknown_ids() -> None:
+    fields = ttlv.parse_fields(ttlv.encode_num_field(1, 50) + ttlv.encode_num_field(250, 7))
+    out = TslMap([]).decode(fields)
+    assert out["battery_percentage"] == 50
+    assert out["id_250"] == 7

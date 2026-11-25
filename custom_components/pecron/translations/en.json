@@ -128,7 +128,8 @@
     "error": {
       "no_transport": "Choose at least one connection.",
       "duplicate_transport": "Each connection can only be chosen once.",
-      "invalid_key": "The local key must be the base64 text of a 16-byte key."
+      "invalid_key": "The local key must be the base64 text of a 16-byte key.",
+      "fast_report_too_short": "Use 0 (off) or at least 20 seconds."
     }
   }
 }
