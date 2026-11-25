@@ -151,3 +151,28 @@ async def test_offline_start_from_cache(fast_timeouts, monkeypatch) -> None:  # 
 
 def test_auth_key_is_base64() -> None:
     assert len(base64.b64decode(AUTH_B64)) == 16
+
+
+@pytest.mark.asyncio
+async def test_missing_key_keeps_link_visible_and_uses_cloud() -> None:
+    from unofficial_pecron_api.exceptions import PecronAPIError
+
+    hass = make_hass()
+    entry = make_entry({"priority_1": "tcp", "priority_2": "cloud", "priority_3": "none"})
+    api = fake_api([{"resourceCode": "battery_percentage", "resourceValce": "80", "dataType": "INT"}])
+
+    def request(method, path, params=None, form_data=None, json_body=None):
+        if path.endswith("productTSL"):
+            return {"tslJson": {"properties": RAW_TSL}}
+        raise PecronAPIError("unsupported", code=5000)
+
+    api._request.side_effect = request
+    with patch("custom_components.pecron.transport.cloud.PecronAPI", return_value=api):
+        coordinator = build(hass, entry)
+        data = await coordinator._async_update_data()
+    link = coordinator.links["F8D8117CB639"]
+    assert [t.name for t in link.transports] == ["tcp", "cloud"]
+    assert data["F8D8117CB639"]["transport"] == "cloud"
+    assert "no local key" in link.health["tcp"].last_error
+    paths = [c.args[1] for c in api._request.call_args_list]
+    assert any(p.endswith("regenerateAuthKey") for p in paths)  # one-time fallback tried

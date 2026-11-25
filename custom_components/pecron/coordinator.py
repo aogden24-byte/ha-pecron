@@ -306,7 +306,11 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
                         _LOGGER.warning("Could not fetch TSL for %s: %s", device.device_name, err)
                 if wants_local and not entry.get("auth_key"):
                     try:
-                        entry["auth_key"] = await self.account.async_auth_key(device)
+                        # No cached key at all: regeneration is allowed as a
+                        # one-time fallback (some models reject getAuthKey).
+                        entry["auth_key"] = await self.account.async_auth_key(
+                            device, allow_regenerate=True
+                        )
                         changed = True
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.warning(
@@ -330,12 +334,18 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
         for name in self.priorities:
             if name == TRANSPORT_CLOUD:
                 transports.append(CloudTransport(self.account, device, self.cloud_interval))
-            elif name == TRANSPORT_TCP and auth_key:
+            elif name in (TRANSPORT_TCP, TRANSPORT_BLE) and not auth_key:
+                # Keep the link visible (as failing, with the reason) rather than
+                # silently dropping it.
+                transports.append(
+                    _UnavailableTransport(name, "no local key for this station (see log)")
+                )
+            elif name == TRANSPORT_TCP:
                 host = self.entry.options.get(
                     f"{CONF_HOST_PREFIX}{device.device_key}"
                 ) or cached.get("host")
                 transports.append(_DiscoveringTcp(self, device.device_key, host, auth_key, tsl_map))
-            elif name == TRANSPORT_BLE and auth_key:
+            elif name == TRANSPORT_BLE:
                 from .transport.ble import BleTransport
 
                 transports.append(
@@ -484,3 +494,17 @@ class _DiscoveringTcp(Transport):
             self._scan.cancel()
         if self._inner is not None:
             await self._inner.close()
+
+
+class _UnavailableTransport(Transport):
+    """Placeholder for an enabled transport that cannot work (e.g. no local key)."""
+
+    def __init__(self, name: str, reason: str) -> None:
+        self.name = name
+        self.reason = reason
+
+    async def read(self) -> dict[str, Any]:
+        raise TransportError(self.reason)
+
+    async def write(self, code: str, value: Any) -> None:
+        raise TransportError(self.reason)

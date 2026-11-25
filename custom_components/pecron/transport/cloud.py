@@ -85,26 +85,50 @@ class CloudAccount:
             return result
         return []
 
-    def _auth_key(self, product_key: str, device_key: str) -> str:
-        """Read the device auth key. Deliberately never calls ``regenerateAuthKey``:
-        regenerating invalidates the key held by every other local client."""
+    def _auth_key(self, product_key: str, device_key: str, allow_regenerate: bool = False) -> str:
+        """Fetch the device's local auth key.
+
+        ``getAuthKey`` only reads the current key. Some models/accounts (the
+        F5000LFP among them) reject it, and only ``regenerateAuthKey`` works,
+        which issues a new key and invalidates any copy another local tool
+        holds. Regeneration is therefore only allowed when the caller has no
+        cached key at all; the result is cached and reused forever after.
+        """
         assert self.api is not None
-        result = self.api._request(  # noqa: SLF001
-            "POST",
-            "/v2/binding/enduserapi/getAuthKey",
-            form_data={"pk": product_key, "dk": device_key},
-        )
-        key = result.get("authKey") if isinstance(result, dict) else None
-        if not key:
-            raise PecronAPIError("getAuthKey returned no key")
-        return str(key)
+        endpoints = ["getAuthKey"] + (["regenerateAuthKey"] if allow_regenerate else [])
+        last_error: Exception | None = None
+        for endpoint in endpoints:
+            try:
+                result = self.api._request(  # noqa: SLF001
+                    "POST",
+                    f"/v2/binding/enduserapi/{endpoint}",
+                    form_data={"pk": product_key, "dk": device_key},
+                )
+            except PecronAPIError as err:
+                if is_auth_error(err):
+                    raise
+                last_error = err
+                _LOGGER.debug("%s failed for %s: %s", endpoint, device_key, err)
+                continue
+            key = result.get("authKey") if isinstance(result, dict) else None
+            if key:
+                if endpoint == "regenerateAuthKey":
+                    _LOGGER.warning(
+                        "getAuthKey is not supported for %s; generated a new local key. "
+                        "Any other local tool using the old key (pecron-monitor, other "
+                        "Pecron integrations) must be re-set up or removed.",
+                        device_key,
+                    )
+                return str(key)
+            last_error = PecronAPIError(f"{endpoint} returned no key")
+        raise last_error or PecronAPIError("no auth key endpoint succeeded")
 
     async def async_raw_tsl(self, device: Device) -> list[dict]:
         return await self.hass.async_add_executor_job(self._run_raw, "_raw_tsl", device.product_key)
 
-    async def async_auth_key(self, device: Device) -> str:
+    async def async_auth_key(self, device: Device, allow_regenerate: bool = False) -> str:
         return await self.hass.async_add_executor_job(
-            self._run_raw, "_auth_key", device.product_key, device.device_key
+            self._run_raw, "_auth_key", device.product_key, device.device_key, allow_regenerate
         )
 
     def _run_raw(self, method: str, *args: Any) -> Any:
