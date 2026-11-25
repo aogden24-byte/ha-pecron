@@ -178,9 +178,11 @@ class DeviceLink:
             if self.active != transport.name:
                 _LOGGER.info("%s: using %s", self.device.device_name, transport.name)
             self.active = transport.name
-            self.values = values
+            # Links report different subsets (BLE omits some settings the
+            # cloud has); keep the last known value of every property.
+            self.values = {**(self.values or {}), **values}
             self.stale_polls = 0
-            return values
+            return self.values
         self.active = None
         self.stale_polls += 1
         return None
@@ -490,7 +492,7 @@ class PecronDataUpdateCoordinator(DataUpdateCoordinator):
         # Only take over the entities if no higher-priority link is delivering.
         if link.active not in (None, TRANSPORT_CLOUD):
             return
-        link.values = values
+        link.values = {**(link.values or {}), **values}
         link.active = TRANSPORT_CLOUD
         link.stale_polls = 0
         link.health[TRANSPORT_CLOUD].success(time.monotonic())
