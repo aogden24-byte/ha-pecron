@@ -52,6 +52,7 @@ DEFAULT_PRIORITIES: Final = ("ble", "tcp", "cloud")
 CONF_SCAN_INTERVAL_LOCAL: Final = "scan_interval_local"
 DEFAULT_SCAN_INTERVAL_LOCAL: Final = 15
 CONF_HOST_PREFIX: Final = "host_"
+CONF_KEY_PREFIX: Final = "key_"
 CONF_DEVICE_CACHE: Final = "device_cache"
 
 # Selector tuning: a link is demoted after FAIL_LIMIT consecutive failures,

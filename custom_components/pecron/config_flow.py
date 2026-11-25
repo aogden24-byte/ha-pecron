@@ -15,6 +15,7 @@ from .const import (
     CONF_DEVICE_CACHE,
     CONF_EMAIL,
     CONF_HOST_PREFIX,
+    CONF_KEY_PREFIX,
     CONF_PASSWORD,
     CONF_REFRESH_INTERVAL,
     CONF_REGION,
@@ -168,30 +169,56 @@ class PecronOptionsFlow(config_entries.OptionsFlow):
         """Optional fixed IP per station (blank = find it on the LAN automatically)."""
         options = self.config_entry.options
         devices = self._cached_devices()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            hosts = {
-                f"{CONF_HOST_PREFIX}{dk}": (user_input.get(dk) or "").strip()
-                for dk in devices
-            }
-            return self.async_create_entry(
-                title="", data={**options, **self._pending, **hosts}
-            )
-        fields = {
-            vol.Optional(
-                dk,
-                description={
-                    "suggested_value": options.get(f"{CONF_HOST_PREFIX}{dk}")
-                    or cached.get("host", "")
-                },
-            ): str
-            for dk, cached in devices.items()
-        }
+            values: dict[str, str] = {}
+            for dk in devices:
+                values[f"{CONF_HOST_PREFIX}{dk}"] = (
+                    user_input.get(f"{CONF_HOST_PREFIX}{dk}") or ""
+                ).strip()
+                key = (user_input.get(f"{CONF_KEY_PREFIX}{dk}") or "").strip()
+                if key and not _valid_key(key):
+                    errors[f"{CONF_KEY_PREFIX}{dk}"] = "invalid_key"
+                values[f"{CONF_KEY_PREFIX}{dk}"] = key
+            if not errors:
+                return self.async_create_entry(
+                    title="", data={**options, **self._pending, **values}
+                )
+        fields: dict[Any, Any] = {}
+        for dk, cached in devices.items():
+            fields[
+                vol.Optional(
+                    f"{CONF_HOST_PREFIX}{dk}",
+                    description={
+                        "suggested_value": options.get(f"{CONF_HOST_PREFIX}{dk}")
+                        or cached.get("host", "")
+                    },
+                )
+            ] = str
+            fields[
+                vol.Optional(
+                    f"{CONF_KEY_PREFIX}{dk}",
+                    description={"suggested_value": options.get(f"{CONF_KEY_PREFIX}{dk}", "")},
+                )
+            ] = str
         names = ", ".join(f"{c.get('name', dk)} = {dk}" for dk, c in devices.items())
         return self.async_show_form(
             step_id="devices",
             data_schema=vol.Schema(fields),
             description_placeholders={"devices": names},
+            errors=errors,
         )
+
+
+def _valid_key(key: str) -> bool:
+    """A local key is base64 for 16 bytes (AES-128)."""
+    import base64
+    import binascii
+
+    try:
+        return len(base64.b64decode(key, validate=True)) == 16
+    except (binascii.Error, ValueError):
+        return False
 
 
 class PecronAuthError(HomeAssistantError):

@@ -116,13 +116,14 @@
         }
       },
       "devices": {
-        "title": "Station addresses",
-        "description": "Optional fixed IP address for each station's Wi-Fi connection. Leave blank to find it on the local network automatically. Stations: {devices}"
+        "title": "Station addresses and keys",
+        "description": "For each station (host_<id>): an optional fixed IP for Wi-Fi; leave blank to find it automatically. Optional local key (key_<id>): only needed if the key cannot be fetched from the cloud, e.g. one copied from another local tool. Stations: {devices}"
       }
     },
     "error": {
       "no_transport": "Choose at least one connection.",
-      "duplicate_transport": "Each connection can only be chosen once."
+      "duplicate_transport": "Each connection can only be chosen once.",
+      "invalid_key": "The local key must be the base64 text of a 16-byte key."
     }
   }
 }
